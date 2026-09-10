@@ -1,3 +1,4 @@
+import { Option } from "effect";
 import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -113,19 +114,19 @@ export class SqliteCheckRepository implements CheckRepositoryShape {
     ) as Row[];
     return rows.map((r) => this.check(String(r.json)));
   }
-  async getIncident(id: string) {
+  async getIncident(id: string): Promise<Option.Option<Incident>> {
     const r = this.db
       .prepare("select json from incidents where id=?")
       .get(id) as Row | undefined;
-    return r ? this.incident(String(r.json)) : undefined;
+    return r ? Option.some(this.incident(String(r.json))) : Option.none();
   }
-  async getOpenIncident(id: TargetId) {
+  async getOpenIncident(id: TargetId): Promise<Option.Option<Incident>> {
     const r = this.db
       .prepare(
         "select json from incidents where json_extract(json,'$.targetId')=? and json_extract(json,'$.status')='Open' order by json_extract(json,'$.openedAt') desc,id desc limit 1",
       )
       .get(id) as Row | undefined;
-    return r ? this.incident(String(r.json)) : undefined;
+    return r ? Option.some(this.incident(String(r.json))) : Option.none();
   }
   async saveIncident(i: Incident) {
     this.db
@@ -145,15 +146,15 @@ export class SqliteCheckRepository implements CheckRepositoryShape {
       await this.memory.saveIncident(this.incident(String(r.json)));
     const transition = await this.memory.applyCheck(c);
     await this.saveCheck(c);
-    const open = await this.memory.getOpenIncident(c.targetId);
-    if (open) await this.saveIncident(open);
+    const openResult = await this.memory.getOpenIncident(c.targetId);
+    if (Option.isSome(openResult)) await this.saveIncident(openResult.value);
     if (transition === "Closed") {
       for (const row of this.db
         .prepare("select json from incidents")
         .all() as Row[]) {
         const i = this.incident(String(row.json));
-        const updated = await this.memory.getIncident(i.id);
-        if (updated) await this.saveIncident(updated);
+        const updatedResult = await this.memory.getIncident(i.id);
+        if (Option.isSome(updatedResult)) await this.saveIncident(updatedResult.value);
       }
     }
     if (transition !== "Unchanged") {

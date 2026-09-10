@@ -1,4 +1,5 @@
 import http from "node:http";
+import { Option } from "effect";
 import type { CheckRepositoryShape } from "../repo/CheckRepository.js";
 import { incidentIdPattern } from "./api.js";
 import { openApiDocument } from "./openapi.js";
@@ -40,15 +41,15 @@ export const createApiHandler =
         );
       if (url.pathname.startsWith("/incidents/")) {
         const id = decodeURIComponent(url.pathname.slice(11));
-        const i = await repo.getIncident(id);
+        const iResult = await repo.getIncident(id);
         if (!incidentIdPattern.test(id))
           return send(400, { message: "invalid incident id" });
-        return i
+        return Option.isSome(iResult)
           ? send(200, {
-              id: i.id,
-              targetId: i.targetId,
-              status: i.status,
-              reason: i.reason,
+              id: iResult.value.id,
+              targetId: iResult.value.targetId,
+              status: iResult.value.status,
+              reason: iResult.value.reason,
             })
           : send(404, { message: `incident not found: ${id}` });
       }

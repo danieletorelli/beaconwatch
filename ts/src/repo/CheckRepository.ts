@@ -1,3 +1,4 @@
+import { Context, Option } from "effect";
 import { randomUUID } from "node:crypto";
 import {
   CheckResult,
@@ -15,11 +16,12 @@ export interface CheckRepositoryShape {
   listTargets(): Promise<readonly Target[]>;
   saveCheck(c: CheckResult): Promise<void>;
   listChecks(targetId?: TargetId): Promise<readonly CheckResult[]>;
-  getIncident(id: string): Promise<Incident | undefined>;
-  getOpenIncident(id: TargetId): Promise<Incident | undefined>;
+  getIncident(id: string): Promise<Option.Option<Incident>>;
+  getOpenIncident(id: TargetId): Promise<Option.Option<Incident>>;
   saveIncident(i: Incident): Promise<void>;
   applyCheck(c: CheckResult): Promise<IncidentTransition>;
 }
+export class CheckRepository extends Context.Service<CheckRepository, CheckRepositoryShape>()("beaconwatch/CheckRepository") {}
 const compare = (a: string, b: string) =>
   Buffer.compare(Buffer.from(a), Buffer.from(b));
 const equalCheck = (a: CheckResult, b: CheckResult) =>
@@ -55,18 +57,18 @@ export class InMemoryCheckRepository implements CheckRepositoryShape {
           a.checkedAt.getTime() - b.checkedAt.getTime() || compare(a.id, b.id),
       );
   }
-  async getIncident(id: string) {
+  async getIncident(id: string): Promise<Option.Option<Incident>> {
     const i = this.incidents.get(id);
-    return i && cloneIncident(i);
+    return i ? Option.some(cloneIncident(i)) : Option.none();
   }
-  async getOpenIncident(id: TargetId) {
+  async getOpenIncident(id: TargetId): Promise<Option.Option<Incident>> {
     const i = [...this.incidents.values()]
       .filter((x) => x.targetId === id && x.status === "Open")
       .sort(
         (a, b) =>
           b.openedAt.getTime() - a.openedAt.getTime() || compare(b.id, a.id),
       )[0];
-    return i && cloneIncident(i);
+    return i ? Option.some(cloneIncident(i)) : Option.none();
   }
   async saveIncident(i: Incident) {
     this.incidents.set(i.id, cloneIncident(i));
@@ -88,15 +90,25 @@ export class InMemoryCheckRepository implements CheckRepositoryShape {
       );
       this.checks.set(c.id, cloneCheck(c));
       if (newer) return result;
-      const open = await this.getOpenIncident(c.targetId);
+      const openResult = await this.getOpenIncident(c.targetId);
       const bad = ["Down", "Slow", "InvalidResponse"].includes(
         c.classification._tag,
       );
       if (bad) {
-        const reason = c.failure?.reason ?? c.classification._tag;
-        if (open) {
+        const reason = Option.isSome(c.failure)
+          ? c.failure.value.reason
+          : c.classification._tag;
+        if (Option.isSome(openResult)) {
+          const open = openResult.value;
           await this.saveIncident(
-            new Incident({ ...open, reason, latestCheckId: c.id }),
+            new Incident({
+              id: open.id,
+              targetId: open.targetId,
+              openedAt: open.openedAt,
+              status: open.status,
+              reason,
+              latestCheckId: c.id,
+            }),
           );
           result = "Updated";
         } else {
@@ -120,10 +132,14 @@ export class InMemoryCheckRepository implements CheckRepositoryShape {
           for (const i of opens)
             await this.saveIncident(
               new Incident({
-                ...i,
+                id: i.id,
+                targetId: i.targetId,
+                openedAt: i.openedAt,
                 status: "Closed",
                 closedAt: new Date(Math.max(Date.now(), i.openedAt.getTime())),
+                reason: i.reason,
                 latestCheckId: c.id,
+                ...(Option.isSome(i.summary) ? { summary: i.summary.value } : {}),
               }),
             );
           result = "Closed";
