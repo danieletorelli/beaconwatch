@@ -1,3 +1,4 @@
+import { Effect } from "effect";
 import { ConfigError } from "../domain/errors.js";
 export interface ConnectionHandle {
   readonly id: number;
@@ -62,6 +63,28 @@ export const nestedResources = async (
   events.push("use");
   await outer.release();
   await inner.release();
+};
+
+export const nestedResourcesEffect = (
+  events: string[],
+  failures: { use?: boolean; outerRelease?: boolean; innerRelease?: boolean } = {},
+): Effect.Effect<void> => {
+  const acquire = (name: "outer" | "inner", failRelease: boolean) =>
+    Effect.acquireRelease(
+      Effect.sync(() => { events.push(`acquire-${name}`); }),
+      () => Effect.sync(() => {
+        events.push(`release-${name}`);
+        if (failRelease) throw new Error(`${name} release failed`);
+      }),
+    );
+  return Effect.scoped(
+    Effect.gen(function*() {
+      yield* acquire("outer", failures.outerRelease ?? false);
+      yield* acquire("inner", failures.innerRelease ?? false);
+      if (failures.use) yield* Effect.die(new Error("nested use failed"));
+      events.push("use");
+    }),
+  );
 };
 
 export class ClientCache {
