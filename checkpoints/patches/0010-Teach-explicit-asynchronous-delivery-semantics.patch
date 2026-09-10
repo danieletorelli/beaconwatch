@@ -1,0 +1,235 @@
+From edc4ff7d8ebfa8d0e691c20955d34a4c35225835 Mon Sep 17 00:00:00 2001
+From: BeaconWatch Workshop <workshop@local.invalid>
+Date: Wed, 9 Sep 2026 10:39:20 +0000
+Subject: [PATCH] Teach explicit asynchronous delivery semantics
+
+---
+ package.json                                  |  1 +
+ src/repo/ConnectionPool.ts                    | 11 +++-
+ src/watch/Scheduler.ts                        | 54 +++++++++++++++----
+ src/watch/StatusState.ts                      | 15 +++---
+ test/checkpoint-09/delivery-semantics.test.ts | 47 ++++++++++++++++
+ 5 files changed, 109 insertions(+), 19 deletions(-)
+ create mode 100644 test/checkpoint-09/delivery-semantics.test.ts
+
+diff --git a/package.json b/package.json
+index f0790fd..359cb73 100644
+--- a/package.json
++++ b/package.json
+@@ -19,6 +19,7 @@
+     "checkpoint:06": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke",
+     "checkpoint:07": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/checkpoint-07 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke",
+     "checkpoint:08": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/checkpoint-07 test/checkpoint-08 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
++    ,"checkpoint:09": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/checkpoint-07 test/checkpoint-08 test/checkpoint-09 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
+   },
+   "dependencies": {
+     "@effect/platform-node": "4.0.0-rc.112",
+diff --git a/src/repo/ConnectionPool.ts b/src/repo/ConnectionPool.ts
+index d44d8ff..d987a22 100644
+--- a/src/repo/ConnectionPool.ts
++++ b/src/repo/ConnectionPool.ts
+@@ -1,5 +1,5 @@
+-import { Effect, Semaphore } from "effect";
++import { Effect, Pool, Semaphore } from "effect";
+ import { ConfigError } from "../domain/errors.js";
+ export interface ConnectionHandle { readonly id: number }
+ export const MAX_CONNECTION_POOL_SIZE = 1024;
+ export interface LayerOptions {
+@@ -55,3 +55,12 @@ export class ClientCache {
+   release(client: ConnectionHandle) { this.clients.push(client); }
+   invalidate(client: ConnectionHandle) { this.release(client); }
+ }
++
++export const pooledClients = (size: number, events: string[]) => Pool.make({
++  size,
++  acquire: Effect.sync(() => {
++    const client = { id: events.filter((x) => x.startsWith("open:")).length };
++    events.push(`open:${client.id}`);
++    return client;
++  }),
++});
+diff --git a/src/watch/Scheduler.ts b/src/watch/Scheduler.ts
+index 77be377..2355974 100644
+--- a/src/watch/Scheduler.ts
++++ b/src/watch/Scheduler.ts
+@@ -4,7 +4,7 @@ import { probeOnce } from "../probe/ProbeProgram.js";
+ import type { ProbeClientShape } from "../services/ProbeClient.js";
+ import type { CheckRepositoryShape } from "../repo/CheckRepository.js";
+ import type { StatusState } from "./StatusState.js";
+-import { Cause, Effect, Queue } from "effect";
++import { Cause, Effect, PubSub, Queue, Schedule } from "effect";
+ export interface SchedulerOptions {
+   queueCapacity: number;
+   workerCount: number;
+@@ -57,9 +57,20 @@ export function watchLoopEffect(
+ ) {
+   const active = targets.filter(enabled);
+-  const wait = active.length === 0 ? 60_000 : Math.min(...active.map((t) => t.interval));
+-  return validateEffect(options).pipe(
+-    Effect.andThen(Effect.forever(runOnceEffect(active, options, s).pipe(Effect.andThen(Effect.sleep(wait))))),
+-  );
++  return Effect.scoped(Effect.gen(function*() {
++    yield* validateEffect(options);
++    const queue = yield* Queue.make<Target | TargetConfig, Cause.Done>({ capacity: options.queueCapacity });
++    const consume = Effect.forever(Effect.gen(function*() {
++      const target = yield* Queue.take(queue);
++      const check = yield* awaitPromise((signal) => probeOnce(target, s.client, signal));
++      yield* awaitPromise(() => s.repository.applyCheck(check));
++      const incident = yield* awaitPromise(() => s.repository.getOpenIncident(check.targetId));
++      yield* awaitPromise(() => s.status.update(check, incident));
++    }));
++    yield* Effect.all([
++      ...Array.from({ length: options.workerCount }, () => consume),
++      ...active.map((target) => Effect.repeat(Queue.offer(queue, target), Schedule.spaced(target.interval))),
++    ], { concurrency: "unbounded", discard: true });
++  }));
+ }
+ export function watchLoop(
+   targets: readonly (Target | TargetConfig)[], options: SchedulerOptions,
+@@ -92,16 +104,38 @@ export class JobBuffer<A> {
+   dequeue(): JobDequeue<A> { return { take: () => this.take() }; }
+ }
+ export const callbackJobAdapter = <A>(buffer: JobBuffer<A>) =>
+-  (job: A) => { void buffer.offer(job); };
++  {
++    let dropped = 0;
++    const offer = (job: A) => {
++      const accepted = Queue.offerUnsafe(buffer["queue"], job);
++      if (!accepted) dropped++;
++      return accepted;
++    };
++    offer.dropped = () => dropped;
++    return offer;
++  };
+
+ export class BulletinBus<A> {
+-  private subscribers: Array<(value: A) => void> = [];
+-  subscribe(f: (value: A) => void) { this.subscribers.push(f); }
+-  publish(value: A) { this.subscribers.shift()?.(value); }
++  private readonly pubsub = Effect.runSync(PubSub.unbounded<A>());
++  private active = 0;
++  subscribe(f: (value: A) => void) {
++    const pubsub = this.pubsub;
++    return Effect.acquireRelease(
++      Effect.sync(() => { this.active++; }),
++      () => Effect.sync(() => { this.active--; }),
++    ).pipe(Effect.andThen(Effect.scoped(Effect.gen(function*() {
++      const subscription = yield* PubSub.subscribe(pubsub);
++      yield* Effect.forever(Effect.flatMap(PubSub.take(subscription), (value) => Effect.sync(() => f(value))));
++    }))));
++  }
++  publish(value: A) { return PubSub.publish(this.pubsub, value); }
++  subscriberCount() { return this.active; }
+ }
+
+ export class WorkerBroadcast<A> {
+-  private workers: Array<(value: A) => void> = [];
+-  addWorker(f: (value: A) => void) { this.workers.push(f); }
+-  offer(value: A) { for (const worker of this.workers) worker(value); }
++  private readonly queue = Effect.runSync(Queue.unbounded<A>());
++  addWorker(f: (value: A) => void) {
++    return Effect.forever(Effect.flatMap(Queue.take(this.queue), (value) => Effect.sync(() => f(value))));
++  }
++  offer(value: A) { return Queue.offer(this.queue, value); }
+ }
+diff --git a/src/watch/StatusState.ts b/src/watch/StatusState.ts
+index b9f432f..13cf1c8 100644
+--- a/src/watch/StatusState.ts
++++ b/src/watch/StatusState.ts
+@@ -5,7 +5,7 @@ import {
+   type Incident,
+   type TargetId,
+ } from "../domain/schema.js";
+-import { Effect, SynchronizedRef } from "effect";
++import { Deferred, Effect, SynchronizedRef } from "effect";
+ export interface StatusEntry {
+   latest: CheckResult;
+   openIncident?: Incident;
+@@ -36,14 +36,25 @@ export class StatusState {
+   }
+ }
+ export class Readiness {
+-  ready = false;
+-  result?: string;
+-  async wait() { while (!this.ready) await new Promise((r) => setTimeout(r, 10)); return this.result; }
+-  complete(value: string) { this.result = value; this.ready = true; }
+-  fail(_error: unknown) {}
+-  reset() { this.ready = false; }
++  private signal = Deferred.makeUnsafe<string, unknown>();
++  private generation = 0;
++  wait(generation = this.generation) {
++    if (generation !== this.generation) return Promise.reject(new Error(`readiness generation ${generation} retired`));
++    return Effect.runPromise(Deferred.await(this.signal));
++  }
++  complete(value: string, generation = this.generation) {
++    return generation === this.generation && Effect.runSync(Deferred.succeed(this.signal, value));
++  }
++  fail(error: unknown, generation = this.generation) {
++    return generation === this.generation && Effect.runSync(Deferred.fail(this.signal, error));
++  }
++  reset() {
++    Effect.runSync(Deferred.fail(this.signal, new Error(`readiness generation ${this.generation} retired`)));
++    this.signal = Deferred.makeUnsafe<string, unknown>();
++    return ++this.generation;
++  }
+   async runGeneration(value: string) {
+-    if (this.result !== undefined) { this.ready = true; return this.wait(); }
+-    this.complete(value);
+-    return this.wait();
++    const generation = this.reset();
++    this.complete(value, generation);
++    return this.wait(generation);
+   }
+diff --git a/test/checkpoint-09/delivery-semantics.test.ts b/test/checkpoint-09/delivery-semantics.test.ts
+new file mode 100644
+index 0000000..ae26efc
+--- /dev/null
++++ b/test/checkpoint-09/delivery-semantics.test.ts
+@@ -0,0 +1,47 @@
++import { expect, it } from "vitest"
++import { Effect } from "effect"
++import { BulletinBus, callbackJobAdapter, JobBuffer, WorkerBroadcast } from "../../src/watch/Scheduler.js"
++import { Readiness } from "../../src/watch/StatusState.js"
++
++it("makes overflow, one-shot readiness, broadcast, and work distribution explicit", async () => {
++  const callback: any = callbackJobAdapter(new JobBuffer<number>(1))
++  expect(callback(1)).toBe(true)
++  expect(callback(2)).toBe(false)
++  expect(callback.dropped()).toBe(1)
++
++  const ready = new Readiness()
++  const first = ready.wait()
++  ready.complete("one")
++  expect(await first).toBe("one")
++  ready.reset()
++  const second = ready.wait()
++  ready.fail(new Error("boot failed"))
++  await expect(second).rejects.toThrow("boot failed")
++  await expect(ready.runGeneration("two")).resolves.toBe("two")
++
++  const bus: any = new BulletinBus<number>()
++  const a: number[] = [], b: number[] = []
++  await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
++    yield* Effect.forkScoped(bus.subscribe((value: number) => a.push(value)) as any)
++    yield* Effect.forkScoped(bus.subscribe((value: number) => b.push(value)) as any)
++    yield* Effect.yieldNow
++    yield* (bus.publish(1) as any)
++    while (a.length < 1 || b.length < 1) yield* Effect.yieldNow
++  }) as any))
++  expect([a, b]).toEqual([[1], [1]])
++  expect(bus.subscriberCount()).toBe(0)
++
++  const workers: any = new WorkerBroadcast<number>()
++  const seen: number[] = []
++  let consumed!: () => void
++  const allConsumed = new Promise<void>(resolve => { consumed = resolve })
++  await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
++    const consume = (value: number) => { seen.push(value); if (seen.length === 3) consumed() }
++    yield* Effect.forkScoped(workers.addWorker(consume) as any)
++    yield* Effect.forkScoped(workers.addWorker(consume) as any)
++    yield* Effect.yieldNow
++    yield* Effect.all([workers.offer(1), workers.offer(2), workers.offer(3)] as any)
++    yield* Effect.promise(() => allConsumed)
++  }) as any))
++  expect(seen.sort()).toEqual([1, 2, 3])
++})

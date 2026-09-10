@@ -1,0 +1,206 @@
+diff --git a/package.json b/package.json
+index 6d5efa8..e4a66c2 100644
+--- a/package.json
++++ b/package.json
+@@ -16,7 +16,8 @@
+     "checkpoint:03": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke",
+     "checkpoint:04": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke",
+     "checkpoint:05": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke",
+-    "checkpoint:06": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
++    "checkpoint:06": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke",
++    "checkpoint:07": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/checkpoint-07 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
+   },
+   "dependencies": {
+     "@effect/platform-node": "4.0.0-rc.112",
+diff --git a/src/probe/ProbeProgram.ts b/src/probe/ProbeProgram.ts
+index 81c0736..b3e6ed3 100644
+--- a/src/probe/ProbeProgram.ts
++++ b/src/probe/ProbeProgram.ts
+@@ -27,16 +27,19 @@ const Ajv = AjvModule as unknown as new () => {
+   compile(schema: object | boolean): ((value: unknown) => boolean) & { readonly $async?: boolean };
+ };
+ const ajv = new Ajv();
+ const bodyMatches = (schema: object | boolean, body: unknown) => Effect.try({
+   try: () => {
+     const validate = ajv.compile(schema);
+     if (validate.$async === true) throw new Error("async schemas are not supported");
+     return validate(body) === true;
+   },
+   catch: (cause) => new HealthSchemaParseError({ reason: String(cause) }),
+ });
+-const sleep = (ms: number, _s?: AbortSignal) =>
+-  new Promise<void>((resolve) => setTimeout(resolve, ms));
++const sleep = (ms: number, signal?: AbortSignal) =>
++  new Promise<void>((resolve, reject) => {
++    const timer = setTimeout(resolve, ms);
++    signal?.addEventListener("abort", () => { clearTimeout(timer); reject(signal.reason); }, { once: true });
++  });
+ export const decodeHealthSchema = (encoded: string) => Effect.gen(function*() {
+   const schema = yield* Effect.try({
+     try: () => JSON.parse(encoded) as unknown,
+@@ -70,6 +73,7 @@ export async function probeOnce(
+         break;
+       await sleep(10 * 2 ** attempt, signal);
+     } finally {
++      clearTimeout(timer);
+       signal?.removeEventListener("abort", abort);
+     }
+   }
+diff --git a/src/watch/Scheduler.ts b/src/watch/Scheduler.ts
+index c58a27f..df61096 100644
+--- a/src/watch/Scheduler.ts
++++ b/src/watch/Scheduler.ts
+@@ -4,6 +4,7 @@ import { probeOnce } from "../probe/ProbeProgram.js";
+ import type { ProbeClientShape } from "../services/ProbeClient.js";
+ import type { CheckRepositoryShape } from "../repo/CheckRepository.js";
+ import type { StatusState } from "./StatusState.js";
++import { Effect } from "effect";
+ export interface SchedulerOptions {
+   queueCapacity: number;
+   workerCount: number;
+@@ -22,46 +23,63 @@ const validate = (o: SchedulerOptions) => {
+     throw new ConfigError({ reason: "workerCount must be a positive integer" });
+ };
+ const enabled = (t: Target | TargetConfig) => !("enabled" in t) || t.enabled;
++const validateEffect = (options: SchedulerOptions) => Effect.try({
++  try: () => validate(options),
++  catch: (cause) => cause instanceof ConfigError ? cause : new ConfigError({ reason: String(cause) }),
++});
++const awaitPromise = <A, E = never>(
++  run: (signal: AbortSignal) => Promise<A>,
++  isExpected?: (cause: unknown) => cause is E,
++) => Effect.callback<A, E>((resume, signal) => {
++  const reject = (cause: unknown) => {
++    if (isExpected?.(cause)) resume(Effect.fail(cause));
++    else resume(Effect.die(cause));
++  };
++  let running: Promise<A>;
++  try { running = run(signal); }
++  catch (cause) { reject(cause); return; }
++  running.then((value) => resume(Effect.succeed(value)), reject);
++  return Effect.promise(() => running.then(() => undefined, () => undefined));
++});
+-export async function runOnce(
++export function runOnceEffect(
+   targets: readonly (Target | TargetConfig)[],
+   options: SchedulerOptions,
+   s: SchedulerServices,
+-  signal?: AbortSignal,
+ ) {
+-  validate(options);
+-  const queue = targets.filter(enabled).slice();
+-  const worker = async (target: Target | TargetConfig) => {
+-      const check = await probeOnce(target, s.client, signal);
+-      await s.repository.applyCheck(check);
+-      await s.status.update(
+-        check,
+-        await s.repository.getOpenIncident(check.targetId),
+-      );
+-  };
+-  await Promise.all(queue.map(worker));
++  return Effect.gen(function*() {
++    yield* validateEffect(options);
++    yield* Effect.forEach(targets.filter(enabled), (target) => Effect.gen(function*() {
++    const check = yield* awaitPromise((signal) => probeOnce(target, s.client, signal));
++    yield* awaitPromise(() => s.repository.applyCheck(check));
++    const incident = yield* awaitPromise(() => s.repository.getOpenIncident(check.targetId));
++    yield* awaitPromise(() => s.status.update(check, incident));
++    }), { concurrency: options.workerCount, discard: true });
++  });
+ }
+-export async function watchLoop(
++export function runOnce(
++  targets: readonly (Target | TargetConfig)[], options: SchedulerOptions,
++  s: SchedulerServices, signal?: AbortSignal,
++) {
++  return Effect.runPromise(runOnceEffect(targets, options, s), signal ? { signal } : undefined);
++}
++export function watchLoopEffect(
+   targets: readonly (Target | TargetConfig)[],
+   options: SchedulerOptions,
+   s: SchedulerServices,
+-  signal: AbortSignal,
+ ) {
+-  validate(options);
+   const active = targets.filter(enabled);
+-  while (!signal.aborted) {
+-    await runOnce(active, options, s, signal);
+-    await new Promise<void>((r) => {
+-      const wait = Math.min(...active.map((t) => t.interval));
+-      const timer = setTimeout(r, wait);
+-    });
+-  }
++  const wait = active.length === 0 ? 60_000 : Math.min(...active.map((t) => t.interval));
++  return validateEffect(options).pipe(
++    Effect.andThen(Effect.forever(runOnceEffect(active, options, s).pipe(Effect.andThen(Effect.sleep(wait))))),
++  );
+ }
+-export const startWatching = (targets: readonly (Target | TargetConfig)[], options: SchedulerOptions, s: SchedulerServices) => {
+-  const controller = new AbortController();
+-  void watchLoop(targets, options, s, controller.signal);
+-  return controller;
+-};
+-export const Live = { runOnce, watchLoop };
++export function watchLoop(
++  targets: readonly (Target | TargetConfig)[], options: SchedulerOptions,
++  s: SchedulerServices, signal: AbortSignal,
++) {
++  return Effect.runPromise(watchLoopEffect(targets, options, s), { signal });
++}
++export const Live = { runOnce, watchLoop, watchLoopEffect };
+ 
+ export class ArrayJobBuffer<A> {
+   readonly jobs: A[] = [];
+diff --git a/test/checkpoint-07/owned-concurrency.test.ts b/test/checkpoint-07/owned-concurrency.test.ts
+new file mode 100644
+index 0000000..6460b50
+--- /dev/null
++++ b/test/checkpoint-07/owned-concurrency.test.ts
+@@ -0,0 +1,47 @@
++import { describe, expect, it } from "vitest";
++import { Effect, Exit, Fiber, Scope } from "effect";
++import { runOnceEffect, watchLoopEffect } from "../../src/watch/Scheduler.js";
++import { StatusState } from "../../src/watch/StatusState.js";
++import { Target, targetId, type CheckResult } from "../../src/domain/schema.js";
++import { FakeProbeClient } from "../../src/services/ProbeClient.js";
++
++const targets = Array.from({ length: 6 }, (_, i) => new Target({ id: targetId(`target_${i}`), name: `${i}`, url: "https://example.test", method: "GET", expectedStatus: [200], interval: 10, timeout: 50, slowThreshold: 20, enabled: true }));
++const services = (client: FakeProbeClient, applyCheck: (c: CheckResult) => Promise<void>) => ({ client, repository: { applyCheck, getOpenIncident: async () => undefined } as any, status: new StatusState() });
++
++describe("Effect-owned scheduler concurrency", () => {
++  it("uses Effect collection concurrency to bound traversal", async () => {
++    let active = 0, peak = 0;
++    const client = new FakeProbeClient({});
++    client.probe = async () => { active++; peak = Math.max(peak, active); await new Promise((r) => setTimeout(r, 2)); active--; return { status: 200, body: {}, bytes: 1 }; };
++    const applied: string[] = [];
++    await Effect.runPromise(runOnceEffect(targets, { queueCapacity: 2, workerCount: 2 }, services(client, async (c) => { applied.push(c.targetId); })));
++    expect(peak).toBe(2); expect(applied).toHaveLength(6);
++  });
++  it("interrupts and awaits in-flight traversal children", async () => {
++    let finalized = false;
++    const client = new FakeProbeClient({});
++    client.probe = async (_target, signal) => new Promise((_, reject) => signal!.addEventListener("abort", () => { finalized = true; reject(signal!.reason); }, { once: true }));
++    await Effect.runPromise(Effect.gen(function*() {
++      const fiber = yield* Effect.forkChild(runOnceEffect(targets.slice(0, 2), { queueCapacity: 2, workerCount: 2 }, services(client, async () => {})));
++      yield* Effect.sleep("5 millis");
++      yield* Fiber.interrupt(fiber);
++    }));
++    expect(finalized).toBe(true);
++  });
++  it("scope close interrupts the watch fiber and awaits child finalization", async () => {
++    const events: string[] = [];
++    const client = new FakeProbeClient({});
++    client.probe = (_target, signal) => new Promise((_, reject) => signal!.addEventListener("abort", () => {
++      events.push("aborted");
++      events.push("finalized"); reject(signal!.reason);
++    }, { once: true }));
++    await Effect.runPromise(Effect.gen(function*() {
++      const scope = yield* Scope.make();
++      yield* Effect.forkIn(watchLoopEffect(targets.slice(0, 1), { queueCapacity: 1, workerCount: 1 }, services(client, async () => {})), scope);
++      yield* Effect.sleep("5 millis");
++      yield* Scope.close(scope, Exit.void);
++    }));
++    events.push("closed");
++    expect(events).toEqual(["aborted", "finalized", "closed"]);
++  });
++});

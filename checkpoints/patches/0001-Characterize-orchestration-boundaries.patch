@@ -1,0 +1,61 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BeaconWatch Curriculum <curriculum@local.invalid>
+Date: Tue, 8 Sep 2026 18:15:15 -0400
+Subject: [PATCH 01/17] Characterize orchestration boundaries
+
+Amp-Thread-ID: https://ampcode.com/threads/T-01a07e63-e568-722f-8fe5-2c9ecc4d8907
+---
+ package.json                             |  4 +++-
+ test/checkpoint-00/orchestration.test.ts | 24 ++++++++++++++++++++++++
+ 2 files changed, 27 insertions(+), 1 deletion(-)
+ create mode 100644 test/checkpoint-00/orchestration.test.ts
+
+diff --git a/package.json b/package.json
+index 1f7c704..4b27778 100644
+--- a/package.json
++++ b/package.json
+@@ -7,7 +7,9 @@
+   "scripts": {
+     "typecheck": "tsc --noEmit",
+     "test": "vitest run",
+-    "test:watch": "vitest"
++    "test:watch": "vitest",
++    "smoke": "vitest run test/native-capabilities.test.ts test/native-cli.test.ts -t 'retains the command smoke path'",
++    "checkpoint:00": "npm run typecheck && vitest run test/checkpoint-00 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
+   },
+   "dependencies": { "ajv": "8.20.0" },
+   "devDependencies": {
+diff --git a/test/checkpoint-00/orchestration.test.ts b/test/checkpoint-00/orchestration.test.ts
+new file mode 100644
+index 0000000..eea8942
+--- /dev/null
++++ b/test/checkpoint-00/orchestration.test.ts
+@@ -0,0 +1,28 @@
++import { describe, expect, it } from "vitest";
++import { eagerStartup } from "../../src/main.js";
++import { IncidentService } from "../../src/services/IncidentService.js";
++import type { CheckRepositoryShape } from "../../src/repo/CheckRepository.js";
++import type { CheckResult } from "../../src/domain/schema.js";
++
++describe("orchestration timing", () => {
++  it("records when startup loading begins", () => {
++    let starts = 0;
++    const start = eagerStartup(async () => { starts++; });
++    expect(starts).toBe(1);
++    expect(start()).toBeInstanceOf(Promise);
++  });
++
++  it("records acknowledgement and repository settlement separately", async () => {
++    let settle!: () => void;
++    let calls = 0, settled = false;
++    const applied = new Promise<void>((resolve) => { settle = () => { settled = true; resolve(); }; });
++    const repo = { applyCheck: () => { calls++; return applied; } } as unknown as CheckRepositoryShape;
++    const service = new IncidentService(repo);
++    expect(service.acknowledge({} as CheckResult)).toBe("acknowledged");
++    expect(calls).toBe(1);
++    expect(settled).toBe(false);
++    settle();
++    await applied;
++    expect(settled).toBe(true);
++  });
++});

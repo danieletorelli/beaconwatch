@@ -1,0 +1,285 @@
+diff --git a/package-lock.json b/package-lock.json
+index 5ce291f..5bcf56b 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -17,6 +17,9 @@
+         "@types/node": "22.18.1",
+         "typescript": "5.9.3",
+         "vitest": "4.1.0"
++      },
++      "engines": {
++        "node": ">=22.19.0"
+       }
+     },
+     "node_modules/@effect/platform-node": {
+diff --git a/package.json b/package.json
+index 4d99e9b..608b2a9 100644
+--- a/package.json
++++ b/package.json
+@@ -15,7 +15,8 @@
+     "checkpoint:02": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke",
+     "checkpoint:03": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke",
+     "checkpoint:04": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke",
+-    "checkpoint:05": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
++    "checkpoint:05": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke",
++    "checkpoint:06": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
+   },
+   "dependencies": {
+     "@effect/platform-node": "4.0.0-rc.112",
+diff --git a/src/obs/Telemetry.ts b/src/obs/Telemetry.ts
+index e339bef..16cac69 100644
+--- a/src/obs/Telemetry.ts
++++ b/src/obs/Telemetry.ts
+@@ -1,4 +1,5 @@
+ import type { CheckResult, TargetId } from "../domain/schema.js";
++import { Effect } from "effect";
+ export const metrics = {
+   probeLatency: [] as number[],
+   targetUpDown: [] as number[],
+@@ -49,12 +50,20 @@ export class TelemetryExporter {
+   export(value: string) { this.events.push(value); }
+   async shutdown() { await new Promise<void>(() => {}); }
+ }
+-export const useTelemetryExporter = async <A>(
++export const useTelemetryExporterEffect = <A, E, R>(
+   exporter: TelemetryExporter,
+-  use: () => Promise<A>,
+-) => {
+-  exporter.start();
+-  const value = await use();
+-  await exporter.shutdown();
+-  return value;
+-};
++  use: Effect.Effect<A, E, R>,
++  shutdownTimeoutMillis = 25,
++) => Effect.scoped(Effect.flatMap(
++    Effect.acquireRelease(
++      Effect.sync(() => { exporter.start(); return exporter; }),
++      (owned) => Effect.promise(() => owned.shutdown()).pipe(
++        Effect.ignore,
++        Effect.timeout(`${shutdownTimeoutMillis} millis`),
++        Effect.ignore,
++      ),
++    ),
++    () => use,
++  ));
++export const useTelemetryExporter = <A>(exporter: TelemetryExporter, use: () => Promise<A>, shutdownTimeoutMillis = 25) =>
++  Effect.runPromise(useTelemetryExporterEffect(exporter, Effect.promise(use), shutdownTimeoutMillis));
+diff --git a/src/repo/ConnectionPool.ts b/src/repo/ConnectionPool.ts
+index b06dfe6..d44d8ff 100644
+--- a/src/repo/ConnectionPool.ts
++++ b/src/repo/ConnectionPool.ts
+@@ -1,68 +1,53 @@
++import { Effect, Semaphore } from "effect";
+ import { ConfigError } from "../domain/errors.js";
+-export interface ConnectionHandle {
+-  readonly id: number;
+-}
++export interface ConnectionHandle { readonly id: number }
++export const MAX_CONNECTION_POOL_SIZE = 1024;
+ export interface LayerOptions {
+   onAcquire?(h: ConnectionHandle): void | Promise<void>;
+   onRelease?(h: ConnectionHandle): void | Promise<void>;
+ }
+ export class ConnectionPool {
+   readonly size: number;
+-  private active = 0;
+   private next = 0;
+-  private waiting: Array<() => void> = [];
+-  constructor(
+-    size: number,
+-    private options: LayerOptions = {},
+-  ) {
++  private readonly permits: Semaphore.Semaphore;
++  constructor(size: number, private options: LayerOptions = {}) {
+-    if (!Number.isSafeInteger(size) || size <= 0)
++    if (!Number.isSafeInteger(size) || size <= 0 || size > MAX_CONNECTION_POOL_SIZE)
+-      throw new ConfigError({
+-        reason: "connection pool size must be a positive integer",
+-      });
++      throw new ConfigError({ reason: `connection pool size must be between 1 and ${MAX_CONNECTION_POOL_SIZE}` });
+     this.size = size;
++    this.permits = Semaphore.makeUnsafe(size);
++  }
++  withConnectionEffect<A, E>(work: (h: ConnectionHandle) => Effect.Effect<A, E>): Effect.Effect<A, E> {
++    const pool = this;
++    const resource = Effect.acquireRelease(
++      Effect.gen(function*() {
++        const handle = { id: pool.next++ };
++        yield* Effect.promise(() => Promise.resolve(pool.options.onAcquire?.(handle)));
++        return handle;
++      }),
++      (handle) => Effect.promise(() => Promise.resolve(pool.options.onRelease?.(handle))).pipe(Effect.orDie),
++    );
++    return this.permits.withPermits(1)(Effect.scoped(Effect.flatMap(resource, work)));
+   }
+-  async withConnection<A>(
+-    work: ((h: ConnectionHandle) => Promise<A>) | Promise<A>,
+-  ): Promise<A> {
+-    if (this.active >= this.size)
+-      await new Promise<void>((r) => this.waiting.push(r));
+-    this.active++;
+-    const h = { id: this.next++ };
+-    await this.options.onAcquire?.(h);
+-    const value = await (typeof work === "function" ? work(h) : work);
+-    await this.options.onRelease?.(h);
+-    this.active--;
+-    this.waiting.shift()?.();
+-    return value;
++  withConnection<A>(work: (h: ConnectionHandle) => Promise<A>): Promise<A> {
++    return Effect.runPromise(this.withConnectionEffect((h) => Effect.promise(() => work(h))));
+   }
+ }
+-export const layer = (size: number, options?: LayerOptions) =>
+-  new ConnectionPool(size, options);
+-export const withConnection = <A>(
+-  pool: ConnectionPool,
+-  work: (h: ConnectionHandle) => Promise<A>,
+-) => pool.withConnection(work);
++export const layer = (size: number, options?: LayerOptions) => new ConnectionPool(size, options);
++export const withConnection = <A>(pool: ConnectionPool, work: (h: ConnectionHandle) => Promise<A>) => pool.withConnection(work);
+ 
+-export const nestedResources = async (
+-  events: string[],
+-  failures: { use?: boolean; outerRelease?: boolean; innerRelease?: boolean } = {},
+-) => {
+-  const acquire = (name: "outer" | "inner", failRelease: boolean) => {
+-    events.push(`acquire-${name}`);
+-    return {
+-      release: async () => {
+-        events.push(`release-${name}`);
+-        if (failRelease) throw new Error(`${name} release failed`);
+-      },
+-    };
+-  };
+-  const outer = acquire("outer", failures.outerRelease ?? false);
+-  const inner = acquire("inner", failures.innerRelease ?? false);
+-  if (failures.use) throw new Error("nested use failed");
+-  events.push("use");
+-  await outer.release();
+-  await inner.release();
+-};
++export const nestedResourcesEffect = (events: string[], failures: { use?: boolean; outerRelease?: boolean; innerRelease?: boolean } = {}) =>
++  Effect.scoped(Effect.gen(function*() {
++    const acquire = (name: "outer" | "inner", failRelease: boolean) => Effect.acquireRelease(
++      Effect.sync(() => { events.push(`acquire-${name}`); return name; }),
++      () => Effect.sync(() => { events.push(`release-${name}`); if (failRelease) throw new Error(`${name} release failed`); }).pipe(Effect.orDie),
++    );
++    yield* acquire("outer", failures.outerRelease ?? false);
++    yield* acquire("inner", failures.innerRelease ?? false);
++    if (failures.use) return yield* Effect.die(new Error("nested use failed"));
++    events.push("use");
++  }));
++export const nestedResources = (events: string[], failures: { use?: boolean; outerRelease?: boolean; innerRelease?: boolean } = {}) =>
++  Effect.runPromise(nestedResourcesEffect(events, failures));
+ 
+ export class ClientCache {
+   private clients: ConnectionHandle[] = [];
+diff --git a/src/runtime/ManagedRuntime.ts b/src/runtime/ManagedRuntime.ts
+index 1e661c9..79bc838 100644
+--- a/src/runtime/ManagedRuntime.ts
++++ b/src/runtime/ManagedRuntime.ts
+@@ -1,6 +1,7 @@
+ import { InMemoryCheckRepository } from "../repo/CheckRepository.js";
+ import { IncidentService } from "../services/IncidentService.js";
+ import { Fake } from "../services/IncidentSummarizer.js";
++import { Effect, Exit, Scope } from "effect";
+ export class ManagedAppRuntime {
+   static acquired = 0;
+   static released = 0;
+@@ -8,18 +9,23 @@ export class ManagedAppRuntime {
+   readonly incidents = new IncidentService(this.repository);
+   readonly summarizer = Fake();
+   private disposed = false;
++  readonly scope = Scope.makeUnsafe();
+   constructor() { ManagedAppRuntime.acquired++; }
+   async runPromise<A>(work: (services: this) => Promise<A>) {
+     if (this.disposed) throw new Error("runtime disposed");
+     return work(this);
+   }
+   async dispose() {
+-    if (!this.disposed) ManagedAppRuntime.released++;
++    if (!this.disposed) {
++      await Effect.runPromise(Scope.close(this.scope, Exit.void));
++      ManagedAppRuntime.released++;
++    }
+     this.disposed = true;
+   }
+ }
+ export const runtime = new ManagedAppRuntime();
+-export const runtimeForRequest = () => new ManagedAppRuntime();
++export const closeScope = () => runtime.dispose();
++export const runtimeForRequest = () => runtime;
+ export const runRequestChild = async <A>(
+   runtime: ManagedAppRuntime,
+   work: (services: ManagedAppRuntime, signal: AbortSignal) => Promise<A>,
+@@ -33,14 +39,12 @@ export const runRequestChild = async <A>(
+   return Promise.race([running, cancelled]);
+ };
+ export class RequestRuntimeHost {
+-  private runtimes = new Set<ManagedAppRuntime>();
++  private readonly app = runtime;
+   async handle<A>(work: (s: ManagedAppRuntime, signal: AbortSignal) => Promise<A>, signal = new AbortController().signal) {
+-    const requestRuntime = runtimeForRequest();
+-    this.runtimes.add(requestRuntime);
+-    return runRequestChild(requestRuntime, work, signal);
++    return runRequestChild(this.app, work, signal);
+   }
+   async shutdown() {
+-    await runtime.dispose();
++    // Framework shutdown wiring remains outside this resource scope.
+   }
+ }
+ export const runPromise = <A>(work: (s: ManagedAppRuntime) => Promise<A>) =>
+diff --git a/test/checkpoint-06/resource-safety.test.ts b/test/checkpoint-06/resource-safety.test.ts
+new file mode 100644
+index 0000000..1abb693
+--- /dev/null
++++ b/test/checkpoint-06/resource-safety.test.ts
+@@ -0,0 +1,46 @@
++import { describe, expect, it } from "vitest";
++import { Effect, Fiber } from "effect";
++import { ConnectionPool } from "../../src/repo/ConnectionPool.js";
++import { RequestRuntimeHost, ManagedAppRuntime } from "../../src/runtime/ManagedRuntime.js";
++import { TelemetryExporter, useTelemetryExporter, useTelemetryExporterEffect } from "../../src/obs/Telemetry.js";
++
++describe("Effect-owned resources", () => {
++  it("shares one scoped graph without wiring framework shutdown yet", async () => {
++    const before = ManagedAppRuntime.acquired;
++    const host = new RequestRuntimeHost();
++    await host.handle(async () => 1); await host.handle(async () => 2); await host.shutdown();
++    expect(ManagedAppRuntime.acquired).toBe(before);
++  });
++  it("runs acquireRelease finalizers when an Effect fiber is interrupted", async () => {
++    const events: string[] = [];
++    const pool = new ConnectionPool(1, { onAcquire: () => { events.push("acquire"); }, onRelease: () => { events.push("release"); } });
++    await Effect.runPromise(Effect.gen(function*() {
++      const fiber = yield* Effect.forkChild(pool.withConnectionEffect(() => Effect.never));
++      yield* Effect.yieldNow;
++      yield* Fiber.interrupt(fiber);
++    }));
++    expect(events).toEqual(["acquire", "release"]);
++  });
++  it("bounds an acquireRelease exporter finalizer", async () => {
++    const exporter = new TelemetryExporter();
++    const started = Date.now();
++    await expect(useTelemetryExporter(exporter, async () => { throw new Error("use"); }, 5)).rejects.toThrow("use");
++    expect(exporter.events).toEqual(["start"]);
++    expect(Date.now() - started).toBeLessThan(100);
++  });
++  it("shuts an exporter down on success, failure, and interruption", async () => {
++    class Exporter extends TelemetryExporter { override async shutdown() { this.events.push("shutdown"); } }
++    for (const use of [Effect.void, Effect.fail("failure")]) {
++      const exporter = new Exporter();
++      await Effect.runPromise(Effect.exit(useTelemetryExporterEffect(exporter, use)));
++      expect(exporter.events).toEqual(["start", "shutdown"]);
++    }
++    const exporter = new Exporter();
++    await Effect.runPromise(Effect.gen(function*() {
++      const fiber = yield* Effect.forkChild(useTelemetryExporterEffect(exporter, Effect.never));
++      yield* Effect.yieldNow;
++      yield* Fiber.interrupt(fiber);
++    }));
++    expect(exporter.events).toEqual(["start", "shutdown"]);
++  });
++});

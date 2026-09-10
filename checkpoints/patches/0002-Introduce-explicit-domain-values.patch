@@ -1,0 +1,470 @@
+diff --git a/package-lock.json b/package-lock.json
+index 91117c6..2afdb75 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -8,14 +8,27 @@
+       "name": "beaconwatch",
+       "version": "0.1.0",
+       "dependencies": {
+-        "ajv": "8.20.0"
++        "ajv": "8.20.0",
++        "effect": "4.0.0-rc.112"
+       },
+       "devDependencies": {
++        "@effect/vitest": "4.0.0-rc.112",
+         "@types/node": "22.18.1",
+         "typescript": "5.9.3",
+         "vitest": "4.1.0"
+       }
+     },
++    "node_modules/@effect/vitest": {
++      "version": "4.0.0-rc.112",
++      "resolved": "https://registry.npmjs.org/@effect/vitest/-/vitest-4.0.0-rc.112.tgz",
++      "integrity": "sha512-mEKh/FI64mt8JK1/v9mpOrJYdnp+UFZdRUBMEdZMiKz7klg6NPqVgg/oeAGH6wOOQc2iAPcfc2H9BbAv1KyzMQ==",
++      "dev": true,
++      "license": "MIT",
++      "peerDependencies": {
++        "effect": "^4.0.0-rc.112",
++        "vitest": ">=4.1.0 <5.0.0"
++      }
++    },
+     "node_modules/@jridgewell/sourcemap-codec": {
+       "version": "1.6.0",
+       "resolved": "https://registry.npmjs.org/@jridgewell/sourcemap-codec/-/sourcemap-codec-1.6.0.tgz",
+@@ -23,6 +36,84 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/@msgpackr-extract/msgpackr-extract-darwin-arm64": {
++      "version": "3.0.4",
++      "resolved": "https://registry.npmjs.org/@msgpackr-extract/msgpackr-extract-darwin-arm64/-/msgpackr-extract-darwin-arm64-3.0.4.tgz",
++      "integrity": "sha512-LCkGo6JDfaBhgST7UpPWgNgLINpcpabaHfyz5OBx75nUYxBsaEPxjnyNjWpeb/xBup/682QnBfRBy2/LvPutZQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ]
++    },
++    "node_modules/@msgpackr-extract/msgpackr-extract-darwin-x64": {
++      "version": "3.0.4",
++      "resolved": "https://registry.npmjs.org/@msgpackr-extract/msgpackr-extract-darwin-x64/-/msgpackr-extract-darwin-x64-3.0.4.tgz",
++      "integrity": "sha512-zExlW9zUJKZH/tOtVMttwjKa4Xm/3KcNjnE3dPN92uCktwavMxpgCA3MoJK/DOnTWsQgo224OaST27/mPNAf+w==",
++      "cpu": [
++        "x64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "darwin"
++      ]
++    },
++    "node_modules/@msgpackr-extract/msgpackr-extract-linux-arm": {
++      "version": "3.0.4",
++      "resolved": "https://registry.npmjs.org/@msgpackr-extract/msgpackr-extract-linux-arm/-/msgpackr-extract-linux-arm-3.0.4.tgz",
++      "integrity": "sha512-Tg3yX65f5GbtXLkrYEHE5oibZG9epyYWas7FogTTEJeDEF9JlXJzKgXaNhT3UXlTOeA+AfZpYZYZ0uPj7Cfquw==",
++      "cpu": [
++        "arm"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ]
++    },
++    "node_modules/@msgpackr-extract/msgpackr-extract-linux-arm64": {
++      "version": "3.0.4",
++      "resolved": "https://registry.npmjs.org/@msgpackr-extract/msgpackr-extract-linux-arm64/-/msgpackr-extract-linux-arm64-3.0.4.tgz",
++      "integrity": "sha512-dgX0P/9wGPJeHFBG+ZmhgE6bmtMt7NP5CRBGyyktpopdk/mW4POnrpQsSLtKI1dwpc+pPLuXHDh6vvskyQE/sw==",
++      "cpu": [
++        "arm64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ]
++    },
++    "node_modules/@msgpackr-extract/msgpackr-extract-linux-x64": {
++      "version": "3.0.4",
++      "resolved": "https://registry.npmjs.org/@msgpackr-extract/msgpackr-extract-linux-x64/-/msgpackr-extract-linux-x64-3.0.4.tgz",
++      "integrity": "sha512-8TNXMEjJc3QEy7R/x1INhgiU+XakDAFUzBhaz7+Rbrs8NH5UQeHQxxmzsSBJGyV6I1jW79undiQm8tOI+D+8FQ==",
++      "cpu": [
++        "x64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "linux"
++      ]
++    },
++    "node_modules/@msgpackr-extract/msgpackr-extract-win32-x64": {
++      "version": "3.0.4",
++      "resolved": "https://registry.npmjs.org/@msgpackr-extract/msgpackr-extract-win32-x64/-/msgpackr-extract-win32-x64-3.0.4.tgz",
++      "integrity": "sha512-CmCXPQrkbwExx3j946/PtHWHbYJiCRBRDl4BlkRQcJB/YOwQxJRTpoo7aTsortjgoJ1x7opzTSxn7C+ASSLVjQ==",
++      "cpu": [
++        "x64"
++      ],
++      "license": "MIT",
++      "optional": true,
++      "os": [
++        "win32"
++      ]
++    },
+     "node_modules/@oxc-project/types": {
+       "version": "0.148.0",
+       "resolved": "https://registry.npmjs.org/@oxc-project/types/-/types-0.148.0.tgz",
+@@ -515,12 +606,22 @@
+       "version": "2.1.2",
+       "resolved": "https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz",
+       "integrity": "sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==",
+-      "dev": true,
++      "devOptional": true,
+       "license": "Apache-2.0",
+       "engines": {
+         "node": ">=8"
+       }
+     },
++    "node_modules/effect": {
++      "version": "4.0.0-rc.112",
++      "resolved": "https://registry.npmjs.org/effect/-/effect-4.0.0-rc.112.tgz",
++      "integrity": "sha512-wXxwuh1Ywnv4cPRM3Wfa0vDwuOHnZ1TsTgHJkG9XgzND6inhBH9n1vBxhg3iIXOia/OrpmvVmd3lrD4vq6bF3A==",
++      "license": "MIT",
++      "dependencies": {
++        "fast-check": "^4.9.0",
++        "msgpackr": "^2.0.5"
++      }
++    },
+     "node_modules/es-module-lexer": {
+       "version": "2.3.2",
+       "resolved": "https://registry.npmjs.org/es-module-lexer/-/es-module-lexer-2.3.2.tgz",
+@@ -548,6 +649,28 @@
+         "node": ">=12.0.0"
+       }
+     },
++    "node_modules/fast-check": {
++      "version": "4.9.0",
++      "resolved": "https://registry.npmjs.org/fast-check/-/fast-check-4.9.0.tgz",
++      "integrity": "sha512-7ms6T7SybUev/PQITciI0yLM2pOSFy5zpG8Ty7tQofcVaQUvrMXp6CBwqF6fThLCLOrfBtuHAtwq6Yu4XPCllg==",
++      "funding": [
++        {
++          "type": "individual",
++          "url": "https://github.com/sponsors/dubzzz"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/fast-check"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "pure-rand": "^8.0.0"
++      },
++      "engines": {
++        "node": ">=12.17.0"
++      }
++    },
+     "node_modules/fast-deep-equal": {
+       "version": "3.1.3",
+       "resolved": "https://registry.npmjs.org/fast-deep-equal/-/fast-deep-equal-3.1.3.tgz",
+@@ -892,6 +1015,37 @@
+         "@jridgewell/sourcemap-codec": "^1.5.5"
+       }
+     },
++    "node_modules/msgpackr": {
++      "version": "2.1.0",
++      "resolved": "https://registry.npmjs.org/msgpackr/-/msgpackr-2.1.0.tgz",
++      "integrity": "sha512-p/pBCVO63CsvvpkomUnNNag6+n38rULuDA6HHe70o2gtC8ODI52foF/4ko2qQcp6OiErJXTmrZeXmsGGHsIQNQ==",
++      "license": "MIT",
++      "optionalDependencies": {
++        "msgpackr-extract": "^3.0.4"
++      }
++    },
++    "node_modules/msgpackr-extract": {
++      "version": "3.0.4",
++      "resolved": "https://registry.npmjs.org/msgpackr-extract/-/msgpackr-extract-3.0.4.tgz",
++      "integrity": "sha512-4kmO/MdyUIkLIvTPr8VHLil4AtoKIoniWPIEk5+CDy0xnWC84azhSFmuJ7PxZdsYtiP5kEeQsORAVIeMgxT+Hw==",
++      "hasInstallScript": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "node-gyp-build-optional-packages": "5.2.2"
++      },
++      "bin": {
++        "download-msgpackr-prebuilds": "bin/download-prebuilds.js"
++      },
++      "optionalDependencies": {
++        "@msgpackr-extract/msgpackr-extract-darwin-arm64": "3.0.4",
++        "@msgpackr-extract/msgpackr-extract-darwin-x64": "3.0.4",
++        "@msgpackr-extract/msgpackr-extract-linux-arm": "3.0.4",
++        "@msgpackr-extract/msgpackr-extract-linux-arm64": "3.0.4",
++        "@msgpackr-extract/msgpackr-extract-linux-x64": "3.0.4",
++        "@msgpackr-extract/msgpackr-extract-win32-x64": "3.0.4"
++      }
++    },
+     "node_modules/nanoid": {
+       "version": "3.3.18",
+       "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.18.tgz",
+@@ -911,6 +1065,21 @@
+         "node": "^10 || ^12 || ^13.7 || ^14 || >=15.0.1"
+       }
+     },
++    "node_modules/node-gyp-build-optional-packages": {
++      "version": "5.2.2",
++      "resolved": "https://registry.npmjs.org/node-gyp-build-optional-packages/-/node-gyp-build-optional-packages-5.2.2.tgz",
++      "integrity": "sha512-s+w+rBWnpTMwSFbaE0UXsRlg7hU4FjekKU4eyAih5T8nJuNZT1nNsskXpxmeqSK9UzkBl6UgRlnKc8hz8IEqOw==",
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "detect-libc": "^2.0.1"
++      },
++      "bin": {
++        "node-gyp-build-optional-packages": "bin.js",
++        "node-gyp-build-optional-packages-optional": "optional.js",
++        "node-gyp-build-optional-packages-test": "build-test.js"
++      }
++    },
+     "node_modules/obug": {
+       "version": "2.1.4",
+       "resolved": "https://registry.npmjs.org/obug/-/obug-2.1.4.tgz",
+@@ -981,6 +1150,22 @@
+         "node": "^10 || ^12 || >=14"
+       }
+     },
++    "node_modules/pure-rand": {
++      "version": "8.4.2",
++      "resolved": "https://registry.npmjs.org/pure-rand/-/pure-rand-8.4.2.tgz",
++      "integrity": "sha512-vvuOGgcuPJAirlHvuQw1TrOiw7ptaIXXmIbNuiNOY6lNGJJH49PQ1Kj4nd783nPdQhQdicgOjVI2yI/9BD6/Ng==",
++      "funding": [
++        {
++          "type": "individual",
++          "url": "https://github.com/sponsors/dubzzz"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/fast-check"
++        }
++      ],
++      "license": "MIT"
++    },
+     "node_modules/require-from-string": {
+       "version": "2.0.2",
+       "resolved": "https://registry.npmjs.org/require-from-string/-/require-from-string-2.0.2.tgz",
+diff --git a/package.json b/package.json
+index 4b27778..2e6c335 100644
+--- a/package.json
++++ b/package.json
+@@ -9,10 +9,12 @@
+     "test": "vitest run",
+     "test:watch": "vitest",
+     "smoke": "vitest run test/native-capabilities.test.ts test/native-cli.test.ts -t 'retains the command smoke path'",
+-    "checkpoint:00": "npm run typecheck && vitest run test/checkpoint-00 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
++    "checkpoint:00": "npm run typecheck && vitest run test/checkpoint-00 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke",
++    "checkpoint:01": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
+   },
+-  "dependencies": { "ajv": "8.20.0" },
++  "dependencies": { "ajv": "8.20.0", "effect": "4.0.0-rc.112" },
+   "devDependencies": {
++    "@effect/vitest": "4.0.0-rc.112",
+     "@types/node": "22.18.1",
+     "typescript": "5.9.3",
+     "vitest": "4.1.0"
+diff --git a/src/domain/schema.ts b/src/domain/schema.ts
+index bde244b..3581219 100644
+--- a/src/domain/schema.ts
++++ b/src/domain/schema.ts
+@@ -2,7 +2,7 @@ export type TargetId = string & { readonly __brand: "TargetId" };
+ export type DurationInput = number | string;
+ 
+ export const durationMillis = (input: DurationInput): number => {
+-  if (typeof input === "number") return input * 1_000;
++  if (typeof input === "number") return input;
+   const match =
+     /^\s*(-?\d+(?:\.\d+)?)\s*(ms|millis(?:econds?)?|seconds?|minutes?|hours?|nanos?)?\s*$/i.exec(
+       input,
+diff --git a/src/domain/values.ts b/src/domain/values.ts
+index e381bf4..66d8cbf 100644
+--- a/src/domain/values.ts
++++ b/src/domain/values.ts
+@@ -15,67 +15,52 @@ import {
+   type TargetId,
+ } from "./schema.js";
+ import { classifyDomainError } from "./classify-match.js";
+-export class ImmutableCheckResult {
+-  constructor(
+-    readonly id: string,
+-    readonly targetId: TargetId,
+-    readonly duration: number,
+-    readonly classification: Classification,
+-  ) {
+-  }
+-}
++import { Data, DateTime, Equal, Option, Result } from "effect";
++export class ImmutableCheckResult extends Data.Class<{
++  readonly id: string;
++  readonly targetId: TargetId;
++  readonly duration: number;
++  readonly classification: Classification;
++}> {}
++class ComparableIncident extends Data.Class<{ readonly encoded: string }> {}
+ export const makeCheckResult = (x: {
+   id: string;
+   targetId: TargetId;
+   duration: number;
+   classification: Classification;
+-}) => new ImmutableCheckResult(x.id, x.targetId, x.duration, x.classification);
+-export const incidentCloseTime = (i: { closedAt?: Date }) => i.closedAt;
+-export const sameIncident = (a: object, b: object) => a === b;
+-export const renameCheck = (check: { id: string }, id: string) => {
+-  check.id = id;
+-  return check;
+-};
++}) => new ImmutableCheckResult(x);
++export const incidentCloseTime = (i: { closedAt?: Date }) => Option.fromUndefinedOr(i.closedAt);
++export const sameIncident = (a: object, b: object) =>
++  Equal.equals(new ComparableIncident({ encoded: JSON.stringify(a) }), new ComparableIncident({ encoded: JSON.stringify(b) }));
++export const renameCheck = <A extends { readonly id: string }>(check: A, id: string): A => ({ ...check, id });
+ export const formatIncidentWindow = (
+   i: { openedAt: Date; closedAt?: Date },
+   timeZone: string,
+-) =>
+-  `${i.openedAt.toLocaleString("sv-SE", { timeZone })} – ${i.closedAt ? i.closedAt.toLocaleString("sv-SE", { timeZone }) : "open"}`;
++) => {
++  const format = (date: Date) => DateTime.formatIsoOffset(DateTime.makeZonedUnsafe(date, { timeZone }));
++  return `${format(i.openedAt)} – ${i.closedAt ? format(i.closedAt) : "open"}`;
++};
+-export type Result<A, E> = { ok: true; value: A } | { ok: false; error: E };
+ export const classifyProbe = (i: {
+   target: TargetConfig;
+   status?: number;
+   duration: number;
+   bodyValid?: boolean;
+   failure?: DomainError;
+-}): Result<Classification, DomainError> => {
++}): Result.Result<Classification, DomainError> => {
+   if (i.failure) {
+     const d = classifyDomainError(i.failure);
+-    if (d === "operator-action") throw i.failure;
+-    return { ok: true, value: d === "ignore-disabled" ? new Unknown() : d === "invalid-response" ? new InvalidResponse() : new Down() };
++    return Result.succeed(d === "ignore-disabled" ? new Unknown() : d === "invalid-response" ? new InvalidResponse() : new Down());
+   }
+   if (i.status === undefined)
+-    return {
+-      ok: false,
+-      error: new TimeoutError({ timeout: String(i.target.timeout) }),
+-    };
++    return Result.fail(new TimeoutError({ timeout: String(i.target.timeout) }));
+   if (!i.target.expectedStatus.includes(i.status))
+-    return {
+-      ok: false,
+-      error: new UnexpectedStatus({
++    return Result.fail(new UnexpectedStatus({
+         expected: i.target.expectedStatus,
+         actual: i.status,
+-      }),
+-    };
++      }));
+   if (i.bodyValid === false)
+-    return {
+-      ok: false,
+-      error: new InvalidBody({
++    return Result.fail(new InvalidBody({
+         reason: "body did not match configured schema",
+-      }),
+-    };
+-  return {
+-    ok: true,
+-    value: i.duration > i.target.slowThreshold ? new Slow() : new Up(),
+-  };
++      }));
++  return Result.succeed(i.duration > i.target.slowThreshold ? new Slow() : new Up());
+ };
+diff --git a/src/probe/ProbeProgram.ts b/src/probe/ProbeProgram.ts
+index e6cf5c7..30fb155 100644
+--- a/src/probe/ProbeProgram.ts
++++ b/src/probe/ProbeProgram.ts
+@@ -6,6 +6,7 @@ import {
+   Down,
+   InvalidResponse,
+   ResponseMetadata,
++  type Classification,
+   type Target,
+   type TargetConfig,
+ } from "../domain/schema.js";
+@@ -18,6 +19,7 @@ import {
+   type DomainError,
+ } from "../domain/errors.js";
+ import { classifyProbe } from "../domain/values.js";
++import { Result } from "effect";
+ import type { ProbeClientShape } from "../services/ProbeClient.js";
+ const Ajv = AjvModule as unknown as new () => {
+   validate(schema: object, value: unknown): boolean;
+@@ -82,16 +84,11 @@ export async function probeOnce(
+     ...(raw ? { status: raw.status } : {}),
+     ...(failure ? { failure } : {}),
+   });
+-  if (!classified.ok) {
+-    failure = classified.error;
+-    classified = {
+-      ok: true,
+-      value:
+-        classified.error instanceof InvalidBody
+-          ? new InvalidResponse()
+-          : new Down(),
+-    };
+-  }
++  let classification: Classification;
++  if (Result.isFailure(classified)) {
++    failure = classified.failure;
++    classification = classified.failure instanceof InvalidBody ? new InvalidResponse() : new Down();
++  } else classification = classified.success;
+   if (raw && !target.expectedStatus.includes(raw.status))
+     failure = new UnexpectedStatus({
+       expected: target.expectedStatus,
+@@ -102,7 +99,7 @@ export async function probeOnce(
+     targetId: target.id,
+     checkedAt: new Date(end),
+     duration,
+-    classification: classified.value,
++    classification,
+     ...(failure ? { failure: new CheckFailure({ reason: failure._tag }) } : {}),
+     response: new ResponseMetadata({
+       ...((raw?.status ??
+diff --git a/test/checkpoint-01/explicit-values.test.ts b/test/checkpoint-01/explicit-values.test.ts
+new file mode 100644
+index 0000000..5941872
+--- /dev/null
++++ b/test/checkpoint-01/explicit-values.test.ts
+@@ -0,0 +1,30 @@
++import { describe, expect, it } from "vitest";
++import { Equal, Option, Result } from "effect";
++import { ConfigError } from "../../src/domain/errors.js";
++import { TargetConfig, Up, durationMillis, targetId } from "../../src/domain/schema.js";
++import { classifyProbe, incidentCloseTime, makeCheckResult, renameCheck } from "../../src/domain/values.js";
++
++const target = new TargetConfig({ id: "target_values", name: "Values", url: "https://example.test", method: "GET", expectedStatus: [200], interval: 10, timeout: 20, slowThreshold: 5 });
++
++describe("explicit domain values", () => {
++  it("represents both close-time branches", () => {
++    expect(Option.isNone(incidentCloseTime({}))).toBe(true);
++    expect(Option.isSome(incidentCloseTime({ closedAt: new Date(0) }))).toBe(true);
++  });
++  it("returns expected classification failures without throwing", () => {
++    expect(Result.isFailure(classifyProbe({ target, status: 503, duration: 1 }))).toBe(true);
++    expect(Result.isFailure(classifyProbe({ target, duration: 1, failure: new ConfigError({ reason: "bad config" }) }))).toBe(true);
++  });
++  it("compares value objects and replaces fields immutably", () => {
++    const a = makeCheckResult({ id: "a", targetId: targetId("target_values"), duration: 1, classification: new Up() });
++    const b = makeCheckResult({ id: "a", targetId: targetId("target_values"), duration: 1, classification: new Up() });
++    expect(Equal.equals(a, b)).toBe(true);
++    const renamed = renameCheck(a, "b");
++    expect(a.id).toBe("a");
++    expect(renamed.id).toBe("b");
++  });
++  it("keeps numeric and explicit string durations in milliseconds", () => {
++    expect(durationMillis(250)).toBe(250);
++    expect(durationMillis("2 seconds")).toBe(2000);
++  });
++});

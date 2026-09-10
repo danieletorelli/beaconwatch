@@ -1,0 +1,210 @@
+From 0441d9d22b9696e8e3a9e29efc9c262ecda0f6d1 Mon Sep 17 00:00:00 2001
+From: BeaconWatch Workshop <workshop@local.invalid>
+Date: Wed, 9 Sep 2026 10:39:37 +0000
+Subject: [PATCH] Make telemetry execution locally observable
+
+---
+ package.json                                  |  1 +
+ src/obs/Telemetry.ts                          | 76 ++++++++++---------
+ src/obs/references.ts                         | 31 ++++----
+ .../observable-execution.test.ts              | 42 ++++++++++
+ 4 files changed, 99 insertions(+), 51 deletions(-)
+ create mode 100644 test/checkpoint-13/observable-execution.test.ts
+
+diff --git a/package.json b/package.json
+index 05c91c6..4ff48d9 100644
+--- a/package.json
++++ b/package.json
+@@ -23,6 +23,7 @@
+     ,"checkpoint:10": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/checkpoint-07 test/checkpoint-08 test/checkpoint-09 test/checkpoint-10 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
+     ,"checkpoint:11": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/checkpoint-07 test/checkpoint-08 test/checkpoint-09 test/checkpoint-10 test/checkpoint-11 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
+     ,"checkpoint:12": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/checkpoint-07 test/checkpoint-08 test/checkpoint-09 test/checkpoint-10 test/checkpoint-11 test/checkpoint-12 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
++    ,"checkpoint:13": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/checkpoint-07 test/checkpoint-08 test/checkpoint-09 test/checkpoint-10 test/checkpoint-11 test/checkpoint-12 test/checkpoint-13 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
+   },
+   "dependencies": {
+     "@effect/platform-node": "4.0.0-rc.112",
+diff --git a/src/obs/Telemetry.ts b/src/obs/Telemetry.ts
+index 2447571..5650bef 100644
+--- a/src/obs/Telemetry.ts
++++ b/src/obs/Telemetry.ts
+@@ -1,5 +1,5 @@
+ import type { CheckResult, TargetId } from "../domain/schema.js";
+-import { Duration, Effect } from "effect";
++import { Duration, Effect, Metric } from "effect";
+ export const metrics = {
+   probeLatency: [] as number[],
+   targetUpDown: [] as number[],
+@@ -7,49 +7,55 @@ export const metrics = {
+   logs: [] as string[],
+   spans: [] as { name: string; start: number; end: number | undefined; parentId?: string; status?: string }[],
+ };
+-export const probeLatency = "beaconwatch_probe_latency_ms",
+-  targetUpDown = "beaconwatch_target_state_total";
+-export const annotateTarget = <A>(p: Promise<A>, id: TargetId) => {
+-  metrics.logs.push(`checking target ${id}`);
+-  return p;
+-};
+-export const annotateCheck = <A>(p: Promise<A>, _id: string) => p;
+-export const withProbeSpan = async <A>(_id: TargetId, p: Promise<A>) => {
+-  const span = { name: "probe", start: Date.now(), end: undefined as number | undefined };
+-  metrics.spans.push(span);
+-  const value = await p;
+-  span.end = Date.now();
+-  return value;
+-};
+-export const runTargetCheck = async <A>(
++export const probeLatency = Metric.histogram("beaconwatch_probe_latency_ms", { boundaries: [10, 50, 100, 250, 500, 1000, 2500, 5000] });
++export const targetUpDown = Metric.counter("beaconwatch_target_state_total");
++export const activeChecks = Metric.gauge("beaconwatch_active_checks");
++
++export const annotateTarget = <A, E, R>(effect: Effect.Effect<A, E, R>, id: TargetId) =>
++  effect.pipe(Effect.annotateLogs("target_id", id));
++export const annotateCheck = <A, E, R>(effect: Effect.Effect<A, E, R>, id: string) =>
++  effect.pipe(Effect.annotateLogs("check_id", id));
++export const withProbeSpan = <A, E, R>(id: TargetId, effect: Effect.Effect<A, E, R>) =>
++  effect.pipe(Effect.withSpan("probe", { attributes: { target_id: id } }));
++export const withDigestSpan = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
++  effect.pipe(Effect.withSpan("digest"));
++
++export const runTargetCheck = <A, E, R>(
+   id: TargetId,
+-  load: () => Promise<unknown>,
+-  probe: () => Promise<A>,
++  load: Effect.Effect<unknown, E, R>,
++  probe: Effect.Effect<A, E, R>,
+ ) => {
+-  const flat = async <B>(name: string, work: () => Promise<B>) => {
+-    const span = { name, start: Date.now(), end: undefined as number | undefined };
+-    metrics.spans.push(span);
+-    const value = await work();
+-    span.end = Date.now();
+-    return value;
+-  };
+-  await flat("load-target", load);
+-  return flat(`probe-${id}`, probe);
+-};
+-export const withDigestSpan = <A>(p: Promise<A>) => p;
+-export const recordCheckMetrics = async (c: CheckResult, between: () => Promise<void> = async () => {}) => {
+-  metrics.active++;
+-  await between();
+-  metrics.probeLatency.push(Duration.toMillis(c.duration));
+-  metrics.targetUpDown.push(c.classification._tag === "Up" ? 1 : 0);
+-  metrics.active--;
++  const children = Effect.gen(function*() {
++    yield* load.pipe(Effect.withSpan("load-target"));
++    return yield* probe.pipe(Effect.withSpan("probe", { attributes: { target_id: id } }));
++  });
++  return children.pipe(Effect.withSpan("target-check", { attributes: { target_id: id } }));
+ };
++
++export const recordCheckMetrics = <A = void, E = never, R = never>(check: CheckResult, work: Effect.Effect<A, E, R> = Effect.void as unknown as Effect.Effect<A, E, R>) =>
++  Effect.acquireUseRelease(
++    Metric.modify(activeChecks, 1),
++    () => work.pipe(Effect.andThen(Effect.all([
++      Metric.update(probeLatency, Duration.toMillis(check.duration)),
++      Metric.update(targetUpDown, check.classification._tag === "Up" ? 1 : 0),
++    ], { discard: true }))),
++    () => Metric.modify(activeChecks, -1),
++  );
+ export class TelemetryExporter {
+   events: string[] = [];
+   start() { this.events.push("start"); }
+   export(value: string) { this.events.push(value); }
+   async shutdown() { await new Promise<void>(() => {}); }
+ }
++/** Install once in the application Scope and share the acquired exporter. */
++export const acquireTelemetryExporter = (exporter: TelemetryExporter, shutdownTimeoutMillis = 25) =>
++  Effect.acquireRelease(
++    Effect.sync(() => { exporter.start(); return exporter; }),
++    (owned) => Effect.promise(() => owned.shutdown()).pipe(
++      Effect.timeout(`${shutdownTimeoutMillis} millis`),
++      Effect.ignore,
++    ),
++  );
+ export const useTelemetryExporterEffect = <A, E, R>(
+   exporter: TelemetryExporter,
+   use: Effect.Effect<A, E, R>,
+diff --git a/src/obs/references.ts b/src/obs/references.ts
+index d11dc02..87c3313 100644
+--- a/src/obs/references.ts
++++ b/src/obs/references.ts
+@@ -1,16 +1,15 @@
+-let level = "Info";
+-export const withMinimumLogLevel = async <A>(
+-  next: string,
+-  work: () => Promise<A>,
+-) => {
+-  const before = level;
+-  level = next;
+-  const value = await work();
+-  level = before;
+-  return value;
+-};
+-export const fiberLocalMinimumLogLevelDemo = async () => {
+-  const before = level;
+-  const inside = await withMinimumLogLevel("Debug", async () => level);
+-  return { before, inside, after: level };
+-};
++import { Effect, References } from "effect";
++
++export type LogLevel = "Debug" | "Info" | "Warn" | "Error";
++
++export const withMinimumLogLevel = <A, E, R>(
++  level: LogLevel,
++  effect: Effect.Effect<A, E, R>,
++) => Effect.provideService(effect, References.MinimumLogLevel, level);
++
++export const fiberLocalMinimumLogLevelDemo = Effect.gen(function*() {
++  const before = yield* References.MinimumLogLevel;
++  const inside = yield* withMinimumLogLevel("Debug", References.MinimumLogLevel);
++  const after = yield* References.MinimumLogLevel;
++  return { before, inside, after };
++});
+diff --git a/test/checkpoint-13/observable-execution.test.ts b/test/checkpoint-13/observable-execution.test.ts
+new file mode 100644
+index 0000000..e508faf
+--- /dev/null
++++ b/test/checkpoint-13/observable-execution.test.ts
+@@ -0,0 +1,42 @@
++import { expect, it } from "vitest"
++import { Effect, Logger, Metric, Redacted, References, Tracer } from "effect"
++import { CheckResult, ResponseMetadata, Up, targetId } from "../../src/domain/schema.js"
++import * as Telemetry from "../../src/obs/Telemetry.js"
++import * as ReferenceDemos from "../../src/obs/references.js"
++
++it("keeps observability structured, scoped, hierarchical, and balanced", async () => {
++  const { activeChecks, annotateTarget, recordCheckMetrics, runTargetCheck, withDigestSpan, withProbeSpan } = Telemetry as any
++  const { fiberLocalMinimumLogLevelDemo, withMinimumLogLevel } = ReferenceDemos as any
++  expect(activeChecks, "publish the scoped active-check gauge").toBeDefined()
++  const local: any = await Effect.runPromise(fiberLocalMinimumLogLevelDemo as any)
++  expect(local.inside).toBe("Debug")
++  expect(local.after).toBe(local.before)
++  const levels = await Effect.runPromise(Effect.all([
++    withMinimumLogLevel("Debug", References.MinimumLogLevel),
++    withMinimumLogLevel("Error", References.MinimumLogLevel),
++  ] as any, { concurrency: 2 }) as any)
++  expect(levels).toEqual(["Debug", "Error"])
++
++  const records: any[] = []
++  const logger = Logger.make(record => records.push({ annotations: record.fiber.getRef(References.CurrentLogAnnotations), message: JSON.stringify(record.message) }))
++  const secret = "do-not-export-this-token"
++  await Effect.runPromise(annotateTarget(Effect.logInfo("done", { token: Redacted.make(secret) }).pipe(Effect.annotateLogs("check_id", "check_1")), targetId("target_api")).pipe(Effect.provide(Logger.layer([logger]))) as any)
++  expect(records[0].annotations).toMatchObject({ target_id: "target_api", check_id: "check_1" })
++  expect(records[0].message).toContain("<redacted>")
++  expect(records[0].message).not.toContain(secret)
++  expect(await Effect.runPromise(withProbeSpan(targetId("target_api"), Effect.currentSpan.pipe(Effect.map(span => span.name))) as any)).toBe("probe")
++  expect(await Effect.runPromise(withDigestSpan(Effect.currentSpan.pipe(Effect.map(span => span.name))) as any)).toBe("digest")
++
++  const spans: Tracer.NativeSpan[] = []
++  const tracer = Tracer.make({ span(options) { const span = new Tracer.NativeSpan(options); spans.push(span); return span } })
++  await Effect.runPromise(runTargetCheck(targetId("target_api"), Effect.void, Effect.fail("probe-failed")).pipe(Effect.withTracer(tracer), Effect.exit) as any)
++  const parent = spans.find(span => span.name === "target-check")!
++  const child = spans.find(span => span.name === "probe")!
++  expect(child.parent._tag === "Some" && child.parent.value.spanId).toBe(parent.spanId)
++  expect(child.status._tag === "Ended" && child.status.exit._tag).toBe("Failure")
++
++  const check = new CheckResult({ id: "check_1", targetId: targetId("target_api"), checkedAt: new Date(), duration: 1, classification: new Up(), response: new ResponseMetadata({}) })
++  await Effect.runPromise(recordCheckMetrics(check, Effect.fail("expected")).pipe(Effect.exit) as any)
++  const gauge: any = (await Effect.runPromise(Metric.value(activeChecks)))
++  expect(gauge.value).toBe(0)
++})

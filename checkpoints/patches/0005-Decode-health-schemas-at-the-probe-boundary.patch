@@ -1,0 +1,164 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BeaconWatch Curriculum <curriculum@local.invalid>
+Date: Tue, 8 Sep 2026 18:18:54 -0400
+Subject: [PATCH 05/17] Decode health schemas at the probe boundary
+
+Amp-Thread-ID: https://ampcode.com/threads/T-01a07e63-e568-722f-8fe5-2c9ecc4d8907
+---
+ package.json                               |  1 +
+ src/domain/classify-match.ts               |  2 +-
+ src/domain/errors.ts                       | 14 ++++++++++++++
+ src/probe/ProbeProgram.ts                  | 20 +++++++++++++-------
+ test/checkpoint-04/schema-boundary.test.ts | 21 +++++++++++++++++++++
+ 5 files changed, 50 insertions(+), 8 deletions(-)
+ create mode 100644 test/checkpoint-04/schema-boundary.test.ts
+
+diff --git a/package.json b/package.json
+index 1f4f93b..61e20b7 100644
+--- a/package.json
++++ b/package.json
+@@ -13,6 +13,7 @@
+     "checkpoint:01": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
+     ,"checkpoint:02": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke",
+     "checkpoint:03": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
++    ,"checkpoint:04": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
+   },
+   "dependencies": { "ajv": "8.20.0", "effect": "4.0.0-rc.112" },
+   "devDependencies": {
+diff --git a/src/domain/classify-match.ts b/src/domain/classify-match.ts
+index 226d6a9..f37abe2 100644
+--- a/src/domain/classify-match.ts
++++ b/src/domain/classify-match.ts
+@@ -7,7 +7,7 @@ export type ErrorDisposition =
+ export const classifyDomainError = (e: DomainError): ErrorDisposition =>
+   e._tag === "TargetDisabled"
+     ? "ignore-disabled"
+-    : e._tag === "InvalidBody"
++    : ["InvalidBody", "HealthSchemaParseError", "HealthBodyMismatch"].includes(e._tag)
+       ? "invalid-response"
+       : ["DnsError", "TimeoutError", "UnexpectedStatus"].includes(e._tag)
+         ? "service-down"
+diff --git a/src/domain/errors.ts b/src/domain/errors.ts
+index 00bd37b..6574e13 100644
+--- a/src/domain/errors.ts
++++ b/src/domain/errors.ts
+@@ -41,6 +41,18 @@ export class InvalidBody extends TaggedError {
+     this.reason = x.reason;
+   }
+ }
++export class HealthSchemaParseError extends TaggedError {
++  readonly reason: string;
++  constructor(x: { reason: string }) {
++    super("HealthSchemaParseError", x.reason);
++    this.reason = x.reason;
++  }
++}
++export class HealthBodyMismatch extends TaggedError {
++  constructor() {
++    super("HealthBodyMismatch", "response body did not match configured schema");
++  }
++}
+ export class TargetDisabled extends TaggedError {
+   readonly targetId: string;
+   constructor(x: { targetId: string }) {
+@@ -78,6 +90,8 @@ export type DomainError =
+   | TimeoutError
+   | UnexpectedStatus
+   | InvalidBody
++  | HealthSchemaParseError
++  | HealthBodyMismatch
+   | TargetDisabled
+   | RepositoryError
+   | ConfigError
+diff --git a/src/probe/ProbeProgram.ts b/src/probe/ProbeProgram.ts
+index 30fb155..81c0736 100644
+--- a/src/probe/ProbeProgram.ts
++++ b/src/probe/ProbeProgram.ts
+@@ -16,9 +16,11 @@ import {
+   UnexpectedStatus,
+   InvalidBody,
+   DnsError,
++  HealthBodyMismatch,
++  HealthSchemaParseError,
+   type DomainError,
+ } from "../domain/errors.js";
+ import { classifyProbe } from "../domain/values.js";
+-import { Result } from "effect";
++import { Effect, Result } from "effect";
+ import type { ProbeClientShape } from "../services/ProbeClient.js";
+ const Ajv = AjvModule as unknown as new () => {
+@@ -25,14 +27,25 @@ const Ajv = AjvModule as unknown as new () => {
+-  validate(schema: object, value: unknown): boolean;
++  compile(schema: object | boolean): ((value: unknown) => boolean) & { readonly $async?: boolean };
+ };
+ const ajv = new Ajv();
++const bodyMatches = (schema: object | boolean, body: unknown) => Effect.try({
++  try: () => {
++    const validate = ajv.compile(schema);
++    if (validate.$async === true) throw new Error("async schemas are not supported");
++    return validate(body) === true;
++  },
++  catch: (cause) => new HealthSchemaParseError({ reason: String(cause) }),
++});
+ const sleep = (ms: number, _s?: AbortSignal) =>
+   new Promise<void>((resolve) => setTimeout(resolve, ms));
+-export const decodeHealthSchema = (encoded: string): object => {
+-  const schema: unknown = JSON.parse(encoded);
++export const decodeHealthSchema = (encoded: string) => Effect.gen(function*() {
++  const schema = yield* Effect.try({
++    try: () => JSON.parse(encoded) as unknown,
++    catch: (cause) => new HealthSchemaParseError({ reason: String(cause) }),
++  });
+-  if (schema === null || typeof schema !== "object" || Array.isArray(schema))
++  if (schema === null || (typeof schema !== "object" && typeof schema !== "boolean") || Array.isArray(schema))
+-    throw new TypeError("health schema must be an object");
++    return yield* Effect.fail(new HealthSchemaParseError({ reason: "health schema must be an object or boolean" }));
+   return schema;
+-};
++});
+ export const repeatSuccessfulProbe = async <A>(run: () => Promise<A>, repeats: number) => {
+   // Execute the supplied probe.
+   return [await run()];
+@@ -73,8 +86,13 @@ export async function probeOnce(
+   let bodyValid = true;
+   if (raw) {
+     if (target.healthBodySchema !== undefined) {
+-      const healthSchema = decodeHealthSchema(target.healthBodySchema);
+-      bodyValid = Boolean(ajv.validate(healthSchema, raw.body));
++      const decoded = await Effect.runPromise(Effect.result(decodeHealthSchema(target.healthBodySchema)));
++      if (Result.isFailure(decoded)) failure = decoded.failure;
++      else {
++        const matched = await Effect.runPromise(Effect.result(bodyMatches(decoded.success, raw.body)));
++        if (Result.isFailure(matched)) failure = matched.failure;
++        else if (!matched.success) failure = new HealthBodyMismatch();
++      }
+     } else bodyValid = raw.body !== "not-json";
+   }
+   let classified = classifyProbe({
+diff --git a/test/checkpoint-04/schema-boundary.test.ts b/test/checkpoint-04/schema-boundary.test.ts
+new file mode 100644
+index 0000000..d49c01b
+--- /dev/null
++++ b/test/checkpoint-04/schema-boundary.test.ts
+@@ -0,0 +1,21 @@
++import { describe, expect, it } from "vitest";
++import { Effect, Exit } from "effect";
++import { HealthBodyMismatch, HealthSchemaParseError } from "../../src/domain/errors.js";
++import { Target } from "../../src/domain/schema.js";
++import { decodeHealthSchema, probeOnce } from "../../src/probe/ProbeProgram.js";
++import { FakeProbeClient } from "../../src/services/ProbeClient.js";
++
++const target = (schema: string) => new Target({ id: "target_schema", name: "Schema", url: "https://example.test", method: "GET", expectedStatus: [200], interval: 10, timeout: 50, slowThreshold: 20, healthBodySchema: schema, enabled: true });
++
++describe("health schema boundary", () => {
++  it("reports malformed schema input as a typed failure", async () => {
++    const exit = await Effect.runPromise(Effect.exit(decodeHealthSchema("not json")));
++    expect(Exit.isFailure(exit)).toBe(true);
++    if (Exit.isFailure(exit)) expect(exit.cause.reasons.some((reason) => reason._tag === "Fail" && reason.error instanceof HealthSchemaParseError)).toBe(true);
++  });
++  it("keeps a valid schema mismatch distinct", async () => {
++    const result = await probeOnce(target(JSON.stringify({ type: "object", required: ["ok"], properties: { ok: { const: true } } })), new FakeProbeClient({ target_schema: { status: 200, body: { ok: false }, bytes: 12 } }));
++    expect(result.classification._tag).toBe("InvalidResponse");
++    expect(result.failure?.reason).toBe(new HealthBodyMismatch()._tag);
++  });
++});

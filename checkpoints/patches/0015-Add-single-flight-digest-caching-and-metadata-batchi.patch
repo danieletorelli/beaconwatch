@@ -1,0 +1,258 @@
+From fd12618e20de01215875292859655f559ce4c8bb Mon Sep 17 00:00:00 2001
+From: BeaconWatch Workshop <workshop@local.invalid>
+Date: Wed, 9 Sep 2026 10:39:37 +0000
+Subject: [PATCH] Add single-flight digest caching and metadata batching
+
+---
+ package.json                        |  1 +
+ src/obs/DigestCache.ts              | 54 +++++-------------------
+ src/obs/TargetTagsResolver.ts       | 58 +++++++++++++------------
+ test/checkpoint-14/batching.test.ts | 32 ++++++++++++++
+ test/checkpoint-14/cache.test.ts    | 65 +++++++++++++++++++++++++++++
+ 5 files changed, 139 insertions(+), 71 deletions(-)
+ create mode 100644 test/checkpoint-14/batching.test.ts
+ create mode 100644 test/checkpoint-14/cache.test.ts
+
+diff --git a/package.json b/package.json
+index 4ff48d9..4e2c74c 100644
+--- a/package.json
++++ b/package.json
+@@ -24,6 +24,7 @@
+     ,"checkpoint:11": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/checkpoint-07 test/checkpoint-08 test/checkpoint-09 test/checkpoint-10 test/checkpoint-11 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
+     ,"checkpoint:12": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/checkpoint-07 test/checkpoint-08 test/checkpoint-09 test/checkpoint-10 test/checkpoint-11 test/checkpoint-12 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
+     ,"checkpoint:13": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/checkpoint-07 test/checkpoint-08 test/checkpoint-09 test/checkpoint-10 test/checkpoint-11 test/checkpoint-12 test/checkpoint-13 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
++    ,"checkpoint:14": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/checkpoint-07 test/checkpoint-08 test/checkpoint-09 test/checkpoint-10 test/checkpoint-11 test/checkpoint-12 test/checkpoint-13 test/checkpoint-14 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
+   },
+   "dependencies": {
+     "@effect/platform-node": "4.0.0-rc.112",
+diff --git a/src/obs/DigestCache.ts b/src/obs/DigestCache.ts
+index 81ab351..cb6de32 100644
+--- a/src/obs/DigestCache.ts
++++ b/src/obs/DigestCache.ts
+@@ -1,44 +1,10 @@
+-import type { TargetId } from "../domain/schema.js";
+-import type { TargetDigest } from "../services/DigestService.js";
+-export class DigestCache {
+-  private identityEntries = new Map<object, Promise<TargetDigest>>();
+-  private entries = new Map<string, { expires: number; value: Promise<TargetDigest> }>();
+-  constructor(
+-    private compute: (id: TargetId) => Promise<TargetDigest>,
+-    private ttl = 60_000,
+-    private capacity = 128,
+-  ) {}
+-  async getByIdentity(id: TargetId) {
+-    const key = { id };
+-    const old = this.identityEntries.get(key);
+-    if (old) return { ...(await old) };
+-    const value = this.compute(id);
+-    this.identityEntries.set(key, value);
+-    return { ...(await value) };
+-  }
+-  async get(id: TargetId) {
+-    const now = Date.now(),
+-      key = `digest:${String(id).toLowerCase()}`,
+-      old = this.entries.get(key);
+-    if (old && old.expires > now) return { ...(await old.value) };
+-    const value = this.compute(id);
+-    this.entries.set(key, { expires: now + this.ttl, value });
+-    if (this.entries.size > this.capacity)
+-      this.entries.delete(this.entries.keys().next().value!);
+-    return { ...(await value) };
+-  }
+-  async getConcurrent(id: TargetId) {
+-    const key = `digest:${String(id).toLowerCase()}`, old = this.entries.get(key);
+-    if (old) return { ...(await old.value) };
+-    const result = await this.compute(id);
+-    this.entries.set(key, { expires: Date.now() + this.ttl, value: Promise.resolve(result) });
+-    return { ...result };
+-  }
+-  async invalidate(id: TargetId) {
+-    this.entries.delete(String(id).toLowerCase());
+-  }
+-}
+-export const makeLayer = (
+-  c: (id: TargetId) => Promise<TargetDigest>,
+-  ttl?: number,
+-) => new DigestCache(c, ttl);
++import { Cache, Context, Duration, Effect, Exit, Layer } from "effect"
++import type { TargetId } from "../domain/schema.js"
++import type { TargetDigest } from "../services/DigestService.js"
++
++export interface DigestCacheShape { readonly get: (id: TargetId) => Effect.Effect<TargetDigest, Error>; readonly invalidate: (id: TargetId) => Effect.Effect<void> }
++export class DigestCache extends Context.Service<DigestCache, DigestCacheShape>()("beaconwatch/DigestCache") {}
++export const makeLayer = (compute: (id: TargetId) => Effect.Effect<TargetDigest, Error>, ttl: Duration.Input = "1 minute", failureTtl: Duration.Input = "1 second") => Layer.effect(DigestCache)(Effect.gen(function*() {
++  const cache = yield* Cache.makeWith(compute, { capacity: 128, timeToLive: (exit) => Exit.isSuccess(exit) ? ttl : failureTtl })
++  return { get: (id) => Cache.get(cache, id).pipe(Effect.map((digest) => ({ ...digest }))), invalidate: (id) => Cache.invalidate(cache, id) }
++}))
+diff --git a/src/obs/TargetTagsResolver.ts b/src/obs/TargetTagsResolver.ts
+index c2e446d..6a53e81 100644
+--- a/src/obs/TargetTagsResolver.ts
++++ b/src/obs/TargetTagsResolver.ts
+@@ -1,27 +1,31 @@
+-import type { TargetId } from "../domain/schema.js";
+-export interface TargetMeta {
+-  tags: readonly string[];
+-  latestIncident: string | undefined;
+-}
+-export class TargetTagsBackend {
+-  calls = 0;
+-  constructor(private backing: ReadonlyMap<TargetId, TargetMeta>) {}
+-  async loadMany(ids: readonly TargetId[]) {
+-    const unique = [...new Set(ids)];
+-    const rows = await Promise.all(unique.map(async (id) => {
+-      this.calls++;
+-      const x = this.backing.get(id === unique[0] ? id : unique[0]!);
+-      return x
+-        ? { ...x, tags: [...x.tags] }
+-        : new Promise<TargetMeta>(() => {});
+-    }));
+-    return rows;
+-  }
+-  async load(id: TargetId) {
+-    return (await this.loadMany([id]))[0]!;
+-  }
+-}
+-export const layer = (m: ReadonlyMap<TargetId, TargetMeta>) =>
+-  new TargetTagsBackend(m);
+-export const loadTargetMeta = (id: TargetId, b: TargetTagsBackend) =>
+-  b.load(id);
++import { Context, Effect, Layer, Ref, Request, RequestResolver } from "effect"
++import type { TargetId } from "../domain/schema.js"
++
++export interface TargetMeta { readonly tags: ReadonlyArray<string>; readonly latestIncident: string | undefined }
++export class LoadTargetMeta extends Request.TaggedClass("LoadTargetMeta")<{ readonly targetId: TargetId }, TargetMeta, never> {}
++export interface TargetTagsBackendShape { readonly resolver: RequestResolver.RequestResolver<LoadTargetMeta>; readonly calls: Effect.Effect<number>; readonly requestedIds: Effect.Effect<ReadonlyArray<ReadonlyArray<TargetId>>> }
++export class TargetTagsBackend extends Context.Service<TargetTagsBackend, TargetTagsBackendShape>()("beaconwatch/TargetTagsBackend") {}
++export const layer = (
++  backing: ReadonlyMap<TargetId, TargetMeta>,
++  loadMany: (ids: ReadonlyArray<TargetId>) => Effect.Effect<ReadonlyMap<TargetId, TargetMeta | undefined>> = (ids) => Effect.sync(() => new Map(ids.map((id) => [id, backing.get(id)])))
++) => Layer.effect(TargetTagsBackend)(Effect.gen(function*() {
++  const counter = yield* Ref.make(0)
++  const requestedIds = yield* Ref.make<ReadonlyArray<ReadonlyArray<TargetId>>>([])
++  const resolver = RequestResolver.makeGrouped<LoadTargetMeta, string>({
++    key: () => "all-target-tags",
++    resolver: (entries) => Effect.gen(function*() {
++      yield* Ref.update(counter, (n) => n + 1)
++      const ids = [...new Set(entries.map((entry) => entry.request.targetId))]
++      yield* Ref.update(requestedIds, (batches) => [...batches, ids])
++      const rows = yield* loadMany(ids)
++      for (const entry of entries) {
++        const metadata = rows.get(entry.request.targetId)
++        yield* Request.succeed(entry, metadata === undefined
++          ? { tags: [], latestIncident: undefined }
++          : { ...metadata, tags: [...metadata.tags] })
++      }
++    })
++  })
++  return { resolver, calls: Ref.get(counter), requestedIds: Ref.get(requestedIds) }
++}))
++export const loadTargetMeta = (targetId: TargetId) => Effect.gen(function*() { const b = yield* TargetTagsBackend; return yield* Effect.request(new LoadTargetMeta({ targetId }), b.resolver) })
+diff --git a/test/checkpoint-14/batching.test.ts b/test/checkpoint-14/batching.test.ts
+new file mode 100644
+index 0000000..3c95a7c
+--- /dev/null
++++ b/test/checkpoint-14/batching.test.ts
+@@ -0,0 +1,32 @@
++import { expect, it } from "vitest"
++import { Effect } from "effect"
++import { targetId } from "../../src/domain/schema.js"
++import * as TagsModule from "../../src/obs/TargetTagsResolver.js"
++
++it("batches metadata while preserving misses, order, duplicates, and storage ownership", async () => {
++  const { layer, loadTargetMeta, TargetTagsBackend } = TagsModule as any
++  expect(layer, "provide the batched Effect request resolver").toBeDefined()
++  const a = targetId("target_a"), b = targetId("target_b"), missing = targetId("target_missing")
++  const backing = new Map([[a, { tags: ["api"], latestIncident: undefined }], [b, { tags: ["docs"], latestIncident: "incident_docs" }]])
++  const bulkInputs: ReadonlyArray<string>[] = []
++  const result: any = await Effect.runPromise(Effect.gen(function*() {
++    const values = yield* Effect.all([loadTargetMeta(b), loadTargetMeta(a), loadTargetMeta(missing), loadTargetMeta(a)] as any, { batching: true, concurrency: "unbounded" })
++    const backend = yield* TargetTagsBackend
++    return { values, calls: yield* backend.calls, requestedIds: yield* backend.requestedIds }
++  }).pipe(Effect.provide(layer(backing, (ids: ReadonlyArray<string>) => Effect.sync(() => {
++    bulkInputs.push([...ids])
++    return new Map(ids.map(id => [id, backing.get(id as any)]))
++  })))) as any)
++  expect(result.calls).toBe(1)
++  expect(bulkInputs).toEqual([[b, a, missing]])
++  expect(result.requestedIds).toEqual([[b, a, missing]])
++  expect(result.values).toEqual([
++    { tags: ["docs"], latestIncident: "incident_docs" },
++    { tags: ["api"], latestIncident: undefined },
++    { tags: [], latestIncident: undefined },
++    { tags: ["api"], latestIncident: undefined },
++  ])
++  Object.defineProperty(result.values[1]!.tags, 0, { value: "mutated" })
++  const fresh: any = await Effect.runPromise(loadTargetMeta(a).pipe(Effect.provide(layer(backing))) as any)
++  expect(fresh.tags).toEqual(["api"])
++})
+diff --git a/test/checkpoint-14/cache.test.ts b/test/checkpoint-14/cache.test.ts
+new file mode 100644
+index 0000000..c6d408a
+--- /dev/null
++++ b/test/checkpoint-14/cache.test.ts
+@@ -0,0 +1,65 @@
++import { it } from "@effect/vitest"
++import { Effect, Fiber } from "effect"
++import { TestClock } from "effect/testing"
++import { expect } from "vitest"
++import { targetId } from "../../src/domain/schema.js"
++import * as CacheModule from "../../src/obs/DigestCache.js"
++
++const id = targetId("target_api")
++const digest = { targetId: id, currentStatus: "Up", p95LatencyMillis: 10, uptimePercent: 100, checks: 1 }
++const cacheApi = CacheModule as any
++const run = (compute: any, body: (cache: any) => any) => Effect.gen(function*() { return yield* body(yield* cacheApi.DigestCache) }).pipe(Effect.provide(cacheApi.makeLayer(compute))) as any
++
++it.effect("keys, expires, invalidates, single-flights, and protects cached digests", () => Effect.gen(function*() {
++  expect(cacheApi.makeLayer, "provide the scoped Effect cache service").toBeDefined()
++  let calls = 0
++  yield* run(() => Effect.sync(() => (++calls, digest)), (cache: any) => Effect.all([cache.get(id), cache.get(targetId("target_api"))], { concurrency: 2 }))
++  expect(calls).toBe(1)
++
++  calls = 0
++  const recovered = yield* run(() => Effect.suspend(() => ++calls === 1 ? Effect.fail(new Error("down")) : Effect.succeed(digest)), (cache: any) => Effect.gen(function*() {
++    const first = yield* cache.get(id).pipe(Effect.flip)
++    const replay = yield* cache.get(id).pipe(Effect.flip)
++    yield* TestClock.adjust("999 millis")
++    const replayJustBeforeExpiry = yield* cache.get(id).pipe(Effect.flip)
++    const callsJustBeforeExpiry = calls
++    yield* TestClock.adjust("2 millis")
++    const value = yield* cache.get(id)
++    return { first, replay, replayJustBeforeExpiry, callsJustBeforeExpiry, value }
++  }))
++  expect(recovered.first).toBeInstanceOf(Error)
++  expect(recovered.replay).toBe(recovered.first)
++  expect(recovered.replayJustBeforeExpiry).toBe(recovered.first)
++  expect(recovered.callsJustBeforeExpiry).toBe(1)
++  expect(recovered.value.currentStatus).toBe("Up")
++  expect(calls).toBe(2)
++
++  calls = 0
++  yield* run(() => Effect.sync(() => (++calls, digest)), (cache: any) => Effect.gen(function*() {
++    yield* cache.get(id)
++    yield* TestClock.adjust("59999 millis")
++    yield* cache.get(id)
++    expect(calls).toBe(1)
++    yield* TestClock.adjust("2 millis")
++    yield* cache.get(id)
++  }))
++  expect(calls).toBe(2)
++
++  calls = 0
++  yield* run(() => Effect.sync(() => (++calls, digest)), (cache: any) => Effect.gen(function*() { yield* cache.get(id); yield* cache.invalidate(id); yield* cache.get(id) }))
++  expect(calls).toBe(2)
++
++  calls = 0
++  const concurrent = yield* run(() => Effect.gen(function*() { calls++; yield* Effect.sleep("1 millis"); return digest }), (cache: any) => Effect.all([cache.get(id), cache.get(id)], { concurrency: 2 }).pipe(Effect.forkChild))
++  yield* Effect.yieldNow
++  yield* TestClock.adjust("1 millis")
++  yield* Fiber.join(concurrent)
++  expect(calls).toBe(1)
++
++  const immutable = yield* run(() => Effect.succeed(digest), (cache: any) => Effect.gen(function*() {
++    const first = yield* cache.get(id)
++    Object.defineProperty(first, "currentStatus", { value: "Down" })
++    return yield* cache.get(id)
++  }))
++  expect(immutable.currentStatus).toBe("Up")
++}) as any)

@@ -1,0 +1,216 @@
+From 13a9d3146370e9e2680dc636c24f76a2c65d984f Mon Sep 17 00:00:00 2001
+From: BeaconWatch Workshop <workshop@local.invalid>
+Date: Wed, 9 Sep 2026 10:39:20 +0000
+Subject: [PATCH] Introduce atomic refs and bounded Effect queues
+
+---
+ package.json                            |  3 +-
+ src/watch/Scheduler.ts                  | 48 +++++++++++++++----------
+ src/watch/StatusState.ts                | 32 ++++++++---------
+ test/checkpoint-08/atomic-queue.test.ts | 43 ++++++++++++++++++++++
+ 4 files changed, 89 insertions(+), 37 deletions(-)
+ create mode 100644 test/checkpoint-08/atomic-queue.test.ts
+
+diff --git a/package.json b/package.json
+index 9e10de3..f0790fd 100644
+--- a/package.json
++++ b/package.json
+@@ -17,7 +17,8 @@
+     "checkpoint:04": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke",
+     "checkpoint:05": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke",
+     "checkpoint:06": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke",
+-    "checkpoint:07": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/checkpoint-07 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
++    "checkpoint:07": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/checkpoint-07 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke",
++    "checkpoint:08": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/checkpoint-07 test/checkpoint-08 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
+   },
+   "dependencies": {
+     "@effect/platform-node": "4.0.0-rc.112",
+diff --git a/src/watch/Scheduler.ts b/src/watch/Scheduler.ts
+index 2a8832a..77be377 100644
+--- a/src/watch/Scheduler.ts
++++ b/src/watch/Scheduler.ts
+@@ -4,7 +4,7 @@ import { probeOnce } from "../probe/ProbeProgram.js";
+ import type { ProbeClientShape } from "../services/ProbeClient.js";
+ import type { CheckRepositoryShape } from "../repo/CheckRepository.js";
+ import type { StatusState } from "./StatusState.js";
+-import { Effect } from "effect";
++import { Cause, Effect, Queue } from "effect";
+ export interface SchedulerOptions {
+   queueCapacity: number;
+   workerCount: number;
+@@ -29,14 +29,18 @@ export function runOnceEffect(
+   s: SchedulerServices,
+ ) {
+-  return Effect.gen(function*() {
+-    yield* validateEffect(options);
+-    yield* Effect.forEach(targets.filter(enabled), (target) => Effect.gen(function*() {
++  const consume = (queue: Queue.Dequeue<Target | TargetConfig, Cause.Done>) => Effect.forever(Effect.gen(function*() {
++    const target = yield* Queue.take(queue);
+     const check = yield* awaitPromise((signal) => probeOnce(target, s.client, signal));
+     yield* awaitPromise(() => s.repository.applyCheck(check));
+     const incident = yield* awaitPromise(() => s.repository.getOpenIncident(check.targetId));
+     yield* awaitPromise(() => s.status.update(check, incident));
+-    }), { concurrency: options.workerCount, discard: true });
+-  });
++  })).pipe(Effect.catchIf(Cause.isDone, () => Effect.void));
++  return Effect.scoped(Effect.gen(function*() {
++    yield* validateEffect(options);
++    const queue = yield* Queue.make<Target | TargetConfig, Cause.Done>({ capacity: options.queueCapacity });
++    const producer = Queue.offerAll(queue, targets.filter(enabled)).pipe(Effect.andThen(Queue.end(queue)));
++    yield* Effect.all([producer, ...Array.from({ length: options.workerCount }, () => consume(queue))], { concurrency: "unbounded", discard: true });
++  }));
+ }
+ export function runOnce(
+   targets: readonly (Target | TargetConfig)[], options: SchedulerOptions,
+@@ -61,26 +67,32 @@ export function watchLoop(
+ export const Live = { runOnce, watchLoop, watchLoopEffect };
+
+ export class ArrayJobBuffer<A> {
+-  readonly jobs: A[] = [];
+-  offer(job: A) { this.jobs.push(job); return true; }
++  private readonly queue: Queue.Queue<A, Cause.Done>;
++  constructor(readonly capacity = 128) {
++    this.queue = Effect.runSync(Queue.bounded<A, Cause.Done>(capacity));
++  }
++  offer(job: A) { return Effect.runPromise(Queue.offer(this.queue, job)); }
++  take() { return Effect.runPromise(Queue.take(this.queue)); }
+ }
++export interface JobEnqueue<A> { offer(job: A): Promise<boolean>; shutdown(): void }
++export interface JobDequeue<A> { take(): Promise<A | undefined> }
+ export class JobBuffer<A> {
+-  readonly jobs: A[] = [];
+-  accepted = 0;
+-  rejected = 0;
+-  dropped = 0;
+-  stopped = false;
+-  constructor(readonly capacity = 128) {}
+-  offer(job: A) {
+-    if (this.stopped) { this.rejected++; return false; }
+-    if (this.jobs.length >= this.capacity) { this.dropped++; return false; }
+-    this.jobs.push(job); this.accepted++; return true;
++  private readonly queue: Queue.Queue<A, Cause.Done>;
++  constructor(readonly capacity = 128) {
++    this.queue = Effect.runSync(Queue.bounded<A, Cause.Done>(capacity));
++  }
++  offerEffect(job: A) { return Queue.offer(this.queue, job); }
++  takeEffect() {
++    return Queue.take(this.queue).pipe(Effect.match({ onFailure: () => undefined, onSuccess: (value) => value as A | undefined }));
+   }
+-  take() { return this.jobs.shift(); }
+-  shutdown() { this.stopped = true; this.jobs.length = 0; }
++  offer(job: A) { return Effect.runPromise(this.offerEffect(job)); }
++  take() { return Effect.runPromise(this.takeEffect()); }
++  shutdown() { Effect.runSync(Queue.end(this.queue)); }
++  enqueue(): JobEnqueue<A> { return { offer: (job) => this.offer(job), shutdown: () => this.shutdown() }; }
++  dequeue(): JobDequeue<A> { return { take: () => this.take() }; }
+ }
+ export const callbackJobAdapter = <A>(buffer: JobBuffer<A>) =>
+-  (job: A) => { buffer.offer(job); };
++  (job: A) => { void buffer.offer(job); };
+
+ export class BulletinBus<A> {
+   private subscribers: Array<(value: A) => void> = [];
+diff --git a/src/watch/StatusState.ts b/src/watch/StatusState.ts
+index 66bd6c3..b9f432f 100644
+--- a/src/watch/StatusState.ts
++++ b/src/watch/StatusState.ts
+@@ -5,6 +5,7 @@ import {
+   type Incident,
+   type TargetId,
+ } from "../domain/schema.js";
++import { Effect, SynchronizedRef } from "effect";
+ export interface StatusEntry {
+   latest: CheckResult;
+   openIncident?: Incident;
+@@ -14,29 +15,24 @@ const copy = (e: StatusEntry): StatusEntry => ({
+   ...(e.openIncident ? { openIncident: cloneIncident(e.openIncident) } : {}),
+ });
+ export class StatusState {
+-  private state = new Map<TargetId, StatusEntry>();
+-  async update(check: CheckResult, incident?: Incident) {
+-    const old = this.state.get(check.targetId);
+-    if (
+-      old &&
+-      (old.latest.checkedAt > check.checkedAt ||
++  private state = SynchronizedRef.makeUnsafe(new Map<TargetId, StatusEntry>());
++  updateEffect(check: CheckResult, incident?: Incident) {
++    return SynchronizedRef.update(this.state, (state) => {
++      const old = state.get(check.targetId);
++      if (old && (old.latest.checkedAt > check.checkedAt ||
+         (old.latest.checkedAt.getTime() === check.checkedAt.getTime() &&
+-          Buffer.compare(Buffer.from(old.latest.id), Buffer.from(check.id)) >
+-            0))
+-    )
+-      return;
+-    await Promise.resolve();
+-    this.state.set(
+-      check.targetId,
+-      copy({ latest: check, ...(incident ? { openIncident: incident } : {}) }),
+-    );
++          Buffer.compare(Buffer.from(old.latest.id), Buffer.from(check.id)) > 0))) return state;
++      return new Map(state).set(check.targetId, copy({ latest: check, ...(incident ? { openIncident: incident } : {}) }));
++    });
+   }
++  update(check: CheckResult, incident?: Incident) { return Effect.runPromise(this.updateEffect(check, incident)); }
++  getEffect(id: TargetId) { return SynchronizedRef.get(this.state).pipe(Effect.map((state) => { const x = state.get(id); return x && copy(x); })); }
+   async get(id: TargetId) {
+-    const x = this.state.get(id);
+-    return x && copy(x);
++    return Effect.runPromise(this.getEffect(id));
+   }
+   async snapshot() {
+-    return new Map([...this.state].map(([k, v]) => [k, copy(v)]));
++    const state = await Effect.runPromise(SynchronizedRef.get(this.state));
++    return new Map([...state].map(([k, v]) => [k, copy(v)]));
+   }
+ }
+ export class Readiness {
+diff --git a/test/checkpoint-08/atomic-queue.test.ts b/test/checkpoint-08/atomic-queue.test.ts
+new file mode 100644
+index 0000000..c4d1e1c
+--- /dev/null
++++ b/test/checkpoint-08/atomic-queue.test.ts
+@@ -0,0 +1,43 @@
++import { expect, it } from "vitest"
++import { Effect, Fiber } from "effect"
++import { JobBuffer, runOnceEffect } from "../../src/watch/Scheduler.js"
++import { CheckResult, ResponseMetadata, Target, Up, targetId } from "../../src/domain/schema.js"
++import { FakeProbeClient } from "../../src/services/ProbeClient.js"
++import { StatusState } from "../../src/watch/StatusState.js"
++
++const check = (id: string, at: number) => new CheckResult({ id, targetId: targetId("target_state"), checkedAt: new Date(at), duration: 1, classification: new Up(), response: new ResponseMetadata({}) })
++
++it("keeps state atomic and gives the queue bounded role-safe shutdown", async () => {
++  const state = new StatusState()
++  await Promise.all([state.update(check("new", 2)), state.update(check("old", 1))])
++  expect((await state.get(targetId("target_state")))?.latest.id).toBe("new")
++
++  let resumed = false
++  const buffer = new JobBuffer<number>(1)
++  const effectBuffer = buffer as any
++  await Effect.runPromise(Effect.gen(function*() {
++    yield* effectBuffer.offerEffect(1)
++    const blocked = yield* Effect.forkChild(effectBuffer.offerEffect(2).pipe(Effect.tap(() => Effect.sync(() => { resumed = true }))))
++    yield* Effect.yieldNow
++    expect(resumed).toBe(false)
++    expect(yield* effectBuffer.takeEffect()).toBe(1)
++    yield* Fiber.join(blocked)
++  }) as any)
++  expect("take" in effectBuffer.enqueue()).toBe(false)
++  expect("offer" in effectBuffer.dequeue()).toBe(false)
++  const draining = new JobBuffer<string>(2)
++  await draining.offer("a")
++  await draining.offer("b")
++  draining.shutdown()
++  expect([await draining.take(), await draining.take(), await draining.take()]).toEqual(["a", "b", undefined])
++  expect(await draining.offer("late")).toBe(false)
++
++  const targets = Array.from({ length: 3 }, (_, index) => new Target({ id: targetId(`target_worker_${index}`), name: `worker ${index}`, url: "https://example.test", method: "GET", expectedStatus: [200], interval: 10, timeout: 50, slowThreshold: 20, enabled: true }))
++  const consumed: string[] = []
++  await Effect.runPromise(runOnceEffect(targets, { queueCapacity: 1, workerCount: 2 }, {
++    client: new FakeProbeClient({}),
++    repository: { applyCheck: async (result: CheckResult) => { consumed.push(result.targetId) }, getOpenIncident: async () => undefined } as any,
++    status: new StatusState()
++  }))
++  expect(consumed.sort()).toEqual(targets.map((target) => target.id).sort())
++})

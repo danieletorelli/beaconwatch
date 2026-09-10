@@ -1,0 +1,138 @@
+diff --git a/package.json b/package.json
+index 4045253..1f4f93b 100644
+--- a/package.json
++++ b/package.json
+@@ -11,7 +11,8 @@
+     "smoke": "vitest run test/native-capabilities.test.ts test/native-cli.test.ts -t 'retains the command smoke path'",
+     "checkpoint:00": "npm run typecheck && vitest run test/checkpoint-00 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke",
+     "checkpoint:01": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
+-    ,"checkpoint:02": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
++    ,"checkpoint:02": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke",
++    "checkpoint:03": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
+   },
+   "dependencies": { "ajv": "8.20.0", "effect": "4.0.0-rc.112" },
+   "devDependencies": {
+diff --git a/src/domain/classify-match.ts b/src/domain/classify-match.ts
+index e2d5e9e..693a90f 100644
+--- a/src/domain/classify-match.ts
++++ b/src/domain/classify-match.ts
+@@ -13,10 +13,12 @@ export const classifyDomainError = (e: DomainError): ErrorDisposition =>
+         ? "service-down"
+         : "operator-action";
+ 
+-export const policyDecision = (policy: { _tag: string }) => {
++export type Policy = { _tag: "Ignore" } | { _tag: "Escalate" } | { _tag: "Accept" };
++export const policyDecision = (policy: Policy) => {
+   switch (policy._tag) {
+     case "Ignore": return "ignored";
+     case "Escalate": return "escalated";
+-    default: return "accepted";
++    case "Accept": return "accepted";
++    default: throw new TypeError(`unknown policy: ${(policy as { _tag: string })._tag}`);
+   }
+ };
+diff --git a/src/domain/defects.ts b/src/domain/defects.ts
+index a5a9c37..22f9911 100644
+--- a/src/domain/defects.ts
++++ b/src/domain/defects.ts
+@@ -1,18 +1,19 @@
+ import { ConfigError } from "./errors.js";
+-export const validatePositiveInterval = async (seconds: number) => {
+-  if (!Number.isFinite(seconds) || seconds <= 0)
+-    throw new ConfigError({ reason: "interval must be positive" });
+-  return seconds;
++import { Cause, Effect, Exit, Result } from "effect";
++export const validatePositiveInterval = (seconds: number) =>
++  !Number.isFinite(seconds) || seconds <= 0
++    ? Effect.fail(new ConfigError({ reason: "interval must be positive" }))
++    : Effect.succeed(seconds);
++export const assertCheckInvariant = (condition: boolean) =>
++  condition ? Effect.void : Effect.die(new Error("BeaconWatch invariant violated"));
++export const exitKind = <A, E>(exit: Exit.Exit<A, E>) => {
++  if (!Exit.isFailure(exit)) return "success" as const;
++  if (Cause.hasDies(exit.cause)) return "defect" as const;
++  if (Cause.hasFails(exit.cause)) return "typed-failure" as const;
++  return "interruption" as const;
+ };
+-export const assertCheckInvariant = async (condition: boolean) => {
+-  if (!condition) throw new Error("BeaconWatch invariant violated");
++export const firstTypedFailure = <A, E>(exit: Exit.Exit<A, E>) => {
++  if (!Exit.isFailure(exit)) return undefined;
++  const found = Cause.findFail(exit.cause);
++  return Result.isSuccess(found) ? found.success.error : undefined;
+ };
+-export type Exit<A, E> =
+-  | { ok: true; value: A }
+-  | { ok: false; cause: { kind: "failure"; error: E } }
+-  | { ok: false; cause: { kind: "defect"; defect: unknown } }
+-  | { ok: false; cause: { kind: "interruption"; reason?: unknown } };
+-export const exitKind = <A, E>(e: Exit<A, E>) =>
+-  e.ok ? "success" : "error";
+-export const firstTypedFailure = <A, E>(e: Exit<A, E>) =>
+-  !e.ok && e.cause.kind === "failure" ? e.cause.error : undefined;
+diff --git a/src/services/RecoveryPolicy.ts b/src/services/RecoveryPolicy.ts
+index d89cccf..82219e0 100644
+--- a/src/services/RecoveryPolicy.ts
++++ b/src/services/RecoveryPolicy.ts
+@@ -8,6 +8,8 @@ import {
+   type TargetConfig,
+ } from "../domain/schema.js";
+ import { DnsError, TimeoutError } from "../domain/errors.js";
++import { Effect } from "effect";
++import type { DomainError } from "../domain/errors.js";
+ export const degradedCheckResult = (
+   t: Target | TargetConfig,
+   e: DnsError | TimeoutError,
+@@ -22,13 +24,11 @@ export const degradedCheckResult = (
+     failure: new CheckFailure({ reason: e._tag }),
+     response: new ResponseMetadata({}),
+   });
+-export const recoverTransientProbe = async <A>(
+-  effect: Promise<A>,
++export const recoverTransientProbe = <A>(
++  effect: Effect.Effect<A, DomainError>,
+   fallback: (e: DnsError | TimeoutError) => A,
+-) => {
+-  try {
+-    return await effect;
+-  } catch (e) {
+-    return fallback(e as DnsError | TimeoutError);
+-  }
+-};
++) => effect.pipe(Effect.catch((error) =>
++  error instanceof DnsError || error instanceof TimeoutError
++    ? Effect.succeed(fallback(error))
++    : Effect.fail(error)
++));
+diff --git a/test/checkpoint-03/failure-channels.test.ts b/test/checkpoint-03/failure-channels.test.ts
+new file mode 100644
+index 0000000..7830ca3
+--- /dev/null
++++ b/test/checkpoint-03/failure-channels.test.ts
+@@ -0,0 +1,26 @@
++import { describe, expect, it } from "vitest";
++import { Effect } from "effect";
++import { ConfigError, DnsError, RepositoryError, type DomainError } from "../../src/domain/errors.js";
++import { assertCheckInvariant, exitKind, validatePositiveInterval } from "../../src/domain/defects.js";
++import { policyDecision } from "../../src/domain/classify-match.js";
++import { recoverTransientProbe } from "../../src/services/RecoveryPolicy.js";
++
++describe("failure channels", () => {
++  it("distinguishes typed failure, defect, and interruption", async () => {
++    expect(exitKind(await Effect.runPromise(Effect.exit(validatePositiveInterval(0))))).toBe("typed-failure");
++    expect(exitKind(await Effect.runPromise(Effect.exit(assertCheckInvariant(false))))).toBe("defect");
++    expect(exitKind(await Effect.runPromise(Effect.exit(Effect.interrupt)))).toBe("interruption");
++  });
++  it("handles every policy choice", () => {
++    expect(policyDecision({ _tag: "Ignore" })).toBe("ignored");
++    expect(policyDecision({ _tag: "Escalate" })).toBe("escalated");
++    expect(policyDecision({ _tag: "Accept" })).toBe("accepted");
++  });
++  it("recovers selected transport failures only", async () => {
++    const recovered = recoverTransientProbe(Effect.fail(new DnsError({ host: "example.test" })) as Effect.Effect<string, DomainError>, () => "degraded");
++    await expect(Effect.runPromise(recovered)).resolves.toBe("degraded");
++    const retained = recoverTransientProbe(Effect.fail(new RepositoryError({ operation: "save" })) as Effect.Effect<string, DomainError>, () => "degraded");
++    await expect(Effect.runPromise(retained)).rejects.toBeTruthy();
++    void new ConfigError({ reason: "typed" });
++  });
++});

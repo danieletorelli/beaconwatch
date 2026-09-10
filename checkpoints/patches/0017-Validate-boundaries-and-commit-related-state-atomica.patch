@@ -1,0 +1,1676 @@
+diff --git a/package-lock.json b/package-lock.json
+index d3e5ff1..017dba6 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -9,6 +9,7 @@
+       "version": "0.1.0",
+       "dependencies": {
+         "@effect/platform-node": "4.0.0-rc.112",
++        "@effect/sql-sqlite-node": "4.0.0-rc.112",
+         "ajv": "8.20.0",
+         "effect": "4.0.0-rc.112"
+       },
+@@ -56,6 +57,15 @@
+         "effect": "^4.0.0-rc.112"
+       }
+     },
++    "node_modules/@effect/sql-sqlite-node": {
++      "version": "4.0.0-rc.112",
++      "resolved": "https://registry.npmjs.org/@effect/sql-sqlite-node/-/sql-sqlite-node-4.0.0-rc.112.tgz",
++      "integrity": "sha512-jGRtbJsn5z7DqsMEPSbXq2Q9mYEvMy1v9DTeziTtDEnDzlxhxfrXkSeupZbYqAP5pukIM1JBa10zfAn6KnHG2Q==",
++      "license": "MIT",
++      "peerDependencies": {
++        "effect": "^4.0.0-rc.112"
++      }
++    },
+     "node_modules/@effect/vitest": {
+       "version": "4.0.0-rc.112",
+       "resolved": "https://registry.npmjs.org/@effect/vitest/-/vitest-4.0.0-rc.112.tgz",
+diff --git a/package.json b/package.json
+index 2aea0f5..ef38863 100644
+--- a/package.json
++++ b/package.json
+@@ -26,9 +26,11 @@
+     ,"checkpoint:13": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/checkpoint-07 test/checkpoint-08 test/checkpoint-09 test/checkpoint-10 test/checkpoint-11 test/checkpoint-12 test/checkpoint-13 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
+     ,"checkpoint:14": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/checkpoint-07 test/checkpoint-08 test/checkpoint-09 test/checkpoint-10 test/checkpoint-11 test/checkpoint-12 test/checkpoint-13 test/checkpoint-14 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
+     ,"checkpoint:15": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/checkpoint-07 test/checkpoint-08 test/checkpoint-09 test/checkpoint-10 test/checkpoint-11 test/checkpoint-12 test/checkpoint-13 test/checkpoint-14 test/checkpoint-15 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
++    ,"checkpoint:16": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/checkpoint-07 test/checkpoint-08 test/checkpoint-09 test/checkpoint-10 test/checkpoint-11 test/checkpoint-12 test/checkpoint-13 test/checkpoint-14 test/checkpoint-15 test/checkpoint-16 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
+   },
+   "dependencies": {
+     "@effect/platform-node": "4.0.0-rc.112",
++    "@effect/sql-sqlite-node": "4.0.0-rc.112",
+     "ajv": "8.20.0",
+     "effect": "4.0.0-rc.112"
+   },
+diff --git a/src/domain/history-wire.ts b/src/domain/history-wire.ts
+new file mode 100644
+index 0000000..e89aaed
+--- /dev/null
++++ b/src/domain/history-wire.ts
+@@ -0,0 +1,43 @@
++import { Duration, Effect, Schema } from "effect";
++import { decodeCanonicalStoredCheck } from "./storage.js";
++import { CheckResult } from "./schema.js";
++
++const DurationMillis = Schema.Finite.check(
++  Schema.makeFilter((millis) =>
++    millis > 0 && Number.isSafeInteger(millis * 1_000_000)
++      ? undefined
++      : "duration must be positive and exactly representable as a safe integer number of nanoseconds",
++  ),
++);
++
++const rfc3339Instant = /^(\d{4})-(\d{2})-(\d{2})T([01]\d|2[0-3]):([0-5]\d):([0-5]\d)(?:\.\d{1,3})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
++const Rfc3339Instant = Schema.String.check(Schema.makeFilter((text) => {
++  const match = rfc3339Instant.exec(text);
++  if (!match) return "expected a strict RFC3339 instant";
++  const year = Number(match[1]);
++  const month = Number(match[2]);
++  const day = Number(match[3]);
++  if (year < 1 || year > 9999) return "year must be between 0001 and 9999";
++  if (
++    month < 1 ||
++    month > 12 ||
++    day < 1 ||
++    day > new Date(Date.UTC(year, month, 0)).getUTCDate()
++  ) return "expected a valid calendar instant";
++  return Number.isNaN(Date.parse(text)) ? "expected a valid calendar instant" : undefined;
++}));
++
++const HistoryWire = Schema.Struct({
++  checkedAt: Rfc3339Instant,
++  durationMillis: DurationMillis,
++});
++
++export const decodeHistoryCheck = (input: unknown) =>
++  Schema.decodeUnknownEffect(HistoryWire)(input).pipe(
++    Effect.flatMap(({ durationMillis }) => decodeCanonicalStoredCheck(input).pipe(
++      Effect.map((check) => new CheckResult({
++        ...check,
++        duration: Duration.nanos(BigInt(durationMillis * 1_000_000)),
++      })),
++    )),
++  );
+diff --git a/src/domain/schema.ts b/src/domain/schema.ts
+index d2c5996..7909937 100644
+--- a/src/domain/schema.ts
++++ b/src/domain/schema.ts
+@@ -1,9 +1,22 @@
+ import { Duration, Effect, Option, Schema, SchemaGetter, SchemaIssue } from "effect";
+
+-const TargetIdSchema = Schema.String.check(Schema.isPattern(/^target_[a-z0-9][a-z0-9_-]*$/)).pipe(
++export const TargetId = Schema.String.check(Schema.isPattern(/^target_[a-z0-9][a-z0-9_-]*$/)).pipe(
+   Schema.brand("TargetId"),
+ );
+-export type TargetId = typeof TargetIdSchema.Type;
++export type TargetId = typeof TargetId.Type;
++export const WellFormedString = Schema.String.check(Schema.makeFilter((value) =>
++  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?:^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(value)
++    ? "expected a well-formed Unicode string"
++    : undefined
++));
++export const CheckId = WellFormedString;
++export const IncidentId = WellFormedString.check(Schema.isPattern(/^incident_[a-z0-9][a-z0-9_-]*$/));
++export const AcceptedDate = Schema.Date.check(Schema.makeFilter((date) => {
++  const year = date.getUTCFullYear();
++  return !Number.isNaN(date.getTime()) && year >= 1 && year <= 9999
++    ? undefined
++    : "expected a valid date with year 0001 through 9999";
++}));
+ export type DurationInput = Duration.Input | string;
+
+ const parseDuration = (input: DurationInput): Duration.Duration => {
+@@ -17,10 +30,7 @@ const parseDuration = (input: DurationInput): Duration.Duration => {
+   }
+   if (input.trim() === "Infinity") return Duration.infinity;
+   if (input.trim() === "-Infinity") return Duration.negativeInfinity;
+-  const match =
+-    /^\s*(-?\d+(?:\.\d+)?)\s*(ms|millis(?:econds?)?|seconds?|minutes?|hours?|nanos?)?\s*$/i.exec(
+-      input,
+-    );
++  const match = /^\s*(-?\d+(?:\.\d+)?)\s*(ms|millis(?:econds?)?|seconds?|minutes?|hours?|nanos?)?\s*$/i.exec(input);
+   if (!match) throw new TypeError("invalid duration");
+   const value = match[1]!;
+   const unit = (match[2] ?? "ms").toLowerCase();
+@@ -35,9 +45,11 @@ const parseDuration = (input: DurationInput): Duration.Duration => {
+   return Duration.millis(n);
+ };
+
+-export const durationMillis = (input: DurationInput): number => Duration.toMillis(parseDuration(input));
++export const durationMillis = (input: DurationInput): number => {
++  return Duration.toMillis(parseDuration(input));
++};
+
+-export const targetId = Schema.decodeUnknownSync(TargetIdSchema);
++export const targetId = Schema.decodeUnknownSync(TargetId);
+ export type HttpMethod = "GET" | "POST" | "HEAD";
+ export interface TargetConfigInput {
+   id: string;
+@@ -77,23 +89,31 @@ export const DurationFromInput = Schema.Union([Schema.Number, Schema.String]).pi
+ const PositiveDuration = DurationFromInput.check(
+   Schema.makeFilter((duration) => Duration.isGreaterThan(duration, Duration.zero) ? undefined : "duration must be positive"),
+ );
+-const TargetName = Schema.String.pipe(
++export const TargetName = Schema.String.check(Schema.isMinLength(1)).pipe(
+   Schema.decode({
+     decode: SchemaGetter.transform((value) => value.trim()),
+-    encode: SchemaGetter.transform((value) => value),
++    encode: SchemaGetter.transform((value) => value.trim()),
+   }),
+-  Schema.check(Schema.isMinLength(1), Schema.makeFilter((value) => value === value.trim() ? undefined : "expected normalized text")),
++  Schema.check(
++    Schema.isMinLength(1),
++    Schema.makeFilter((value) => value === value.trim() ? undefined : "expected already-normalized text"),
++  ),
+ );
+-const HttpUrl = Schema.String.check(Schema.makeFilter((value) => {
++export const HttpUrl = Schema.String.check(Schema.makeFilter((value) => {
++  if (!/^[Hh][Tt][Tt][Pp][Ss]?:\/\//.test(value) || /[\s\u0000-\u001f\u007f-\u009f\\]/u.test(value)) {
++    return "expected a lexically valid HTTP(S) URL";
++  }
+   try {
+     const url = new URL(value);
+-    return /https?:/.test(url.protocol) && url.hostname ? undefined : "invalid URL";
++    return (url.protocol === "http:" || url.protocol === "https:") && url.hostname.length > 0
++      ? undefined
++      : "expected an HTTP(S) URL with a hostname";
+   } catch {
+-    return "invalid URL";
++    return "expected an HTTP(S) URL with a hostname";
+   }
+-}, { toJsonSchema: () => ({ format: "uri", pattern: "^https?://" }) }));
++}, { toJsonSchema: () => ({ format: "uri", pattern: "^[Hh][Tt][Tt][Pp][Ss]?://" }) }));
+ const TargetFields = {
+-  id: TargetIdSchema,
++  id: TargetId,
+   name: TargetName,
+   url: HttpUrl,
+   method: Schema.Literals(["GET", "POST", "HEAD"]),
+@@ -169,12 +189,16 @@ export class CheckResult {
+     failure?: CheckFailure;
+     response: ResponseMetadata;
+   }) {
+-    this.id = input.id;
++    this.id = Schema.decodeUnknownSync(CheckId)(input.id);
+     this.targetId = targetId(input.targetId);
+-    this.checkedAt = new Date(input.checkedAt);
++    this.checkedAt = Schema.decodeUnknownSync(AcceptedDate)(new Date(input.checkedAt));
+     this.duration = positive(input.duration);
+     this.classification = input.classification;
+-    if (input.failure) this.failure = input.failure;
++    if (input.failure) {
++      Schema.decodeUnknownSync(WellFormedString)(input.failure.reason);
++      this.failure = input.failure;
++    }
++    if (!(input.response instanceof ResponseMetadata)) throw new TypeError("response is required");
+     this.response = input.response;
+     Object.freeze(this);
+   }
+@@ -199,14 +223,14 @@ export class Incident {
+     summary?: string;
+   }) {
+     Object.assign(this, input);
+-    this.id = input.id;
++    this.id = Schema.decodeUnknownSync(IncidentId)(input.id);
+     this.targetId = targetId(input.targetId);
+-    this.openedAt = new Date(input.openedAt);
++    this.openedAt = Schema.decodeUnknownSync(AcceptedDate)(new Date(input.openedAt));
+     this.status = input.status;
+-    this.reason = input.reason;
+-    this.latestCheckId = input.latestCheckId;
+-    if (input.closedAt) this.closedAt = new Date(input.closedAt);
+-    if (input.summary) this.summary = input.summary;
++    this.reason = Schema.decodeUnknownSync(WellFormedString)(input.reason);
++    this.latestCheckId = Schema.decodeUnknownSync(CheckId)(input.latestCheckId);
++    if (input.closedAt) this.closedAt = Schema.decodeUnknownSync(AcceptedDate)(new Date(input.closedAt));
++    if (input.summary !== undefined) this.summary = Schema.decodeUnknownSync(WellFormedString)(input.summary);
+     if (this.status === "Open" && this.closedAt)
+       throw new TypeError("open incident has close time");
+     if (this.status === "Closed" && !this.closedAt)
+diff --git a/src/domain/storage.ts b/src/domain/storage.ts
+index 472fff7..48a66d6 100644
+--- a/src/domain/storage.ts
++++ b/src/domain/storage.ts
+@@ -1,5 +1,5 @@
+ import { Duration, Effect, Schema } from "effect";
+-import { CheckFailure, CheckResult, Down, Incident, InvalidResponse, ResponseMetadata, Slow, Target, Unknown, Up, targetId } from "./schema.js";
++import { AcceptedDate, CheckFailure, CheckId, CheckResult, Down, Incident, IncidentId, InvalidResponse, ResponseMetadata, Slow, Target, TargetId, Unknown, Up, WellFormedString } from "./schema.js";
+
+ const Classification = Schema.Union([
+   Schema.Struct({ _tag: Schema.Literal("Up") }),
+@@ -9,36 +9,36 @@ const Classification = Schema.Union([
+   Schema.Struct({ _tag: Schema.Literal("Unknown") }),
+ ]);
+ export class StoredCheck extends Schema.Class<StoredCheck>("StoredCheck")({
+-  id: Schema.String,
+-  targetId: Schema.String,
+-  checkedAt: Schema.DateFromString,
++  id: CheckId,
++  targetId: TargetId,
++  checkedAt: Schema.DateFromString.pipe(Schema.decodeTo(AcceptedDate)),
+   durationMillis: Schema.Number.check(Schema.isGreaterThan(0)),
+   classification: Classification,
+-  failure: Schema.optionalKey(Schema.Struct({ reason: Schema.String })),
+-  response: Schema.optionalKey(Schema.Struct({
++  failure: Schema.optionalKey(Schema.Struct({ reason: WellFormedString })),
++  response: Schema.Struct({
+     status: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 100, maximum: 599 }))),
+     bytes: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+-  })),
++  }),
+ }) {}
+ const PersistedStoredCheck = Schema.Struct({
+-  id: Schema.String,
+-  targetId: Schema.String,
+-  checkedAt: Schema.DateFromString,
++  id: CheckId,
++  targetId: TargetId,
++  checkedAt: Schema.DateFromString.pipe(Schema.decodeTo(AcceptedDate)),
+   durationMillis: Schema.Union([Schema.Number.check(Schema.isGreaterThan(0)), Schema.String]),
+   classification: Classification,
+-  failure: Schema.optionalKey(Schema.Struct({ reason: Schema.String })),
+-  response: Schema.optionalKey(Schema.Struct({
++  failure: Schema.optionalKey(Schema.Struct({ reason: WellFormedString })),
++  response: Schema.Struct({
+     status: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 100, maximum: 599 }))),
+     bytes: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+-  })),
++  }),
+ });
+ const LegacyStoredCheck = Schema.Struct({
+-  id: Schema.String,
+-  targetId: Schema.String,
+-  checkedAt: Schema.DateFromString,
++  id: CheckId,
++  targetId: TargetId,
++  checkedAt: Schema.DateFromString.pipe(Schema.decodeTo(AcceptedDate)),
+   duration: Schema.Number.check(Schema.isGreaterThan(0)),
+   classification: Classification,
+-  failure: Schema.optionalKey(Schema.Struct({ reason: Schema.String })),
++  failure: Schema.optionalKey(Schema.Struct({ reason: WellFormedString })),
+   response: Schema.optionalKey(Schema.Struct({
+     status: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 100, maximum: 599 }))),
+     bytes: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+@@ -68,7 +68,7 @@ const encodeDurationInput = Duration.match({
+ export const decodeStoredCheck = (input: unknown) => Schema.decodeUnknownEffect(Schema.Union([PersistedStoredCheck, LegacyStoredCheck]))(input).pipe(
+   Effect.map((row) => new CheckResult({
+     id: row.id,
+-    targetId: targetId(row.targetId),
++    targetId: row.targetId,
+     checkedAt: row.checkedAt,
+     duration: decodeDuration("durationMillis" in row ? row.durationMillis : row.duration),
+     classification: new classes[row.classification._tag](),
+@@ -92,14 +92,14 @@ export const encodeStoredCheck = (check: CheckResult) => ({
+   response: { ...check.response },
+ });
+ const StoredIncident = Schema.Struct({
+-  id: Schema.String,
+-  targetId: Schema.String,
+-  openedAt: Schema.DateFromString,
+-  closedAt: Schema.optionalKey(Schema.DateFromString),
++  id: IncidentId,
++  targetId: TargetId,
++  openedAt: Schema.DateFromString.pipe(Schema.decodeTo(AcceptedDate)),
++  closedAt: Schema.optionalKey(Schema.DateFromString.pipe(Schema.decodeTo(AcceptedDate))),
+   status: Schema.Literals(["Open", "Closed"]),
+-  reason: Schema.String,
+-  latestCheckId: Schema.String,
+-  summary: Schema.optionalKey(Schema.String),
++  reason: WellFormedString,
++  latestCheckId: CheckId,
++  summary: Schema.optionalKey(WellFormedString),
+ });
+ export const decodeStoredTargetSync = (input: unknown) =>
+   Schema.decodeUnknownSync(Target)(input);
+@@ -112,7 +112,7 @@ export const encodeStoredTarget = (target: Target) => ({
+ export const decodeStoredIncidentSync = (input: unknown) => {
+   const row = Schema.decodeUnknownSync(StoredIncident)(input);
+   return new Incident({
+-    id: row.id, targetId: targetId(row.targetId), openedAt: row.openedAt, status: row.status,
++    id: row.id, targetId: row.targetId, openedAt: row.openedAt, status: row.status,
+     reason: row.reason, latestCheckId: row.latestCheckId,
+     ...(row.closedAt === undefined ? {} : { closedAt: row.closedAt }),
+     ...(row.summary === undefined ? {} : { summary: row.summary }),
+diff --git a/src/http/api.ts b/src/http/api.ts
+index 6bed92a..05b0d06 100644
+--- a/src/http/api.ts
++++ b/src/http/api.ts
+@@ -1,3 +1,7 @@
++import { Schema } from "effect";
++import { HttpApi, HttpApiEndpoint, HttpApiGroup } from "effect/unstable/httpapi";
++import { CheckId, HttpUrl, IncidentId, TargetId, TargetName } from "../domain/schema.js";
++
+ export interface TargetDto {
+   id: string;
+   name: string;
+@@ -23,12 +27,16 @@ export interface ApiError {
+   message: string;
+ }
+ export const incidentIdPattern = /^incident_[a-z0-9][a-z0-9_-]*$/;
+-export const BeaconWatchApi = {
+-  name: "BeaconWatch",
+-  endpoints: [
+-    "GET /targets",
+-    "GET /status",
+-    "GET /incidents/:id",
+-    "GET /checks",
+-  ],
+-} as const;
++export const IncidentParams = Schema.Struct({ id: IncidentId });
++const TargetDtoSchema = Schema.Struct({ id: TargetId, name: TargetName, url: HttpUrl, enabled: Schema.Boolean });
++const StatusDtoSchema = Schema.Struct({ ok: Schema.Literal(true), targets: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER })) });
++const IncidentDtoSchema = Schema.Struct({ id: IncidentId, targetId: TargetId, status: Schema.Literals(["Open", "Closed"]), reason: Schema.String });
++const CheckDtoSchema = Schema.Struct({ id: CheckId, targetId: TargetId, classification: Schema.Literals(["Up", "Slow", "Down", "InvalidResponse", "Unknown"]) });
++export const ApiErrorSchema = Schema.Struct({ message: Schema.String });
++export const getTargets = HttpApiEndpoint.make("GET")("getTargets", "/targets", { success: Schema.Array(TargetDtoSchema), error: ApiErrorSchema });
++export const getStatus = HttpApiEndpoint.make("GET")("getStatus", "/status", { success: StatusDtoSchema, error: ApiErrorSchema });
++export const getIncident = HttpApiEndpoint.make("GET")("getIncident", "/incidents/:id", { params: IncidentParams, success: IncidentDtoSchema, error: ApiErrorSchema });
++export const getChecks = HttpApiEndpoint.make("GET")("getChecks", "/checks", { success: Schema.Array(CheckDtoSchema), error: ApiErrorSchema });
++export const BeaconWatchApi = HttpApi.make("BeaconWatch").add(
++  HttpApiGroup.make("default").add(getTargets, getStatus, getIncident, getChecks),
++);
+diff --git a/src/http/server.ts b/src/http/server.ts
+index 381b0db..67a78fc 100644
+--- a/src/http/server.ts
++++ b/src/http/server.ts
+@@ -1,7 +1,30 @@
+ import http from "node:http";
++import { Effect, Layer, Option, Schema } from "effect";
++import { NodeHttpServer } from "@effect/platform-node";
++import { HttpRouter, HttpServer } from "effect/unstable/http";
++import { HttpApiBuilder, OpenApi } from "effect/unstable/httpapi";
+ import type { CheckRepositoryShape } from "../repo/CheckRepository.js";
+-import { incidentIdPattern } from "./api.js";
+-import { openApiDocument } from "./openapi.js";
++import { BeaconWatchApi, IncidentParams } from "./api.js";
++const openApiDocument = OpenApi.fromApi(BeaconWatchApi);
++const repositoryRequest = <A>(message: string, request: () => Promise<A>) => Effect.tryPromise({
++  try: request,
++  catch: () => ({ message }),
++});
++export const productionApiHandlers = (repo: CheckRepositoryShape) => HttpApiBuilder.group(BeaconWatchApi, "default", handlers => handlers
++  .handle("getTargets", () => repositoryRequest("failed to list targets", () => repo.listTargets()).pipe(Effect.map(xs => xs.map(({ id, name, url, enabled }) => ({ id, name, url, enabled })))))
++  .handle("getStatus", () => repositoryRequest("failed to read status", () => repo.listTargets()).pipe(Effect.map(xs => ({ ok: true as const, targets: xs.length }))))
++  .handle("getChecks", () => repositoryRequest("failed to list checks", () => repo.listChecks()).pipe(Effect.map(xs => xs.map(x => ({ id: x.id, targetId: x.targetId, classification: x.classification._tag })))))
++  .handle("getIncident", ({ params }) => repositoryRequest("failed to read incident", () => repo.getIncident(params.id)).pipe(Effect.flatMap(i => i ? Effect.succeed({ id: i.id, targetId: i.targetId, status: i.status, reason: i.reason }) : Effect.fail({ message: `incident not found: ${params.id}` }))))
++);
++export const ApiRoutes = (repo: CheckRepositoryShape) => HttpApiBuilder.layer(BeaconWatchApi, { openapiPath: "/openapi.json" }).pipe(
++  Layer.provide(productionApiHandlers(repo)),
++);
++export const productionWebHandler = (repo: CheckRepositoryShape) => HttpRouter.toWebHandler(ApiRoutes(repo).pipe(
++  Layer.provide(HttpServer.layerServices),
++));
++export const nodeServerLayer = (repo: CheckRepositoryShape, port: number) => HttpRouter.serve(ApiRoutes(repo)).pipe(
++  Layer.provide(NodeHttpServer.layer(http.createServer, { port })),
++);
+ export const createApiHandler =
+   (repo: CheckRepositoryShape) =>
+   async (req: http.IncomingMessage, res: http.ServerResponse) => {
+@@ -9,40 +32,46 @@ export const createApiHandler =
+       res.writeHead(status, { "content-type": "application/json" });
+       res.end(JSON.stringify(value));
+     };
++    const repositoryCall = async <A>(message: string, request: () => Promise<A>) => {
++      try { return await request(); }
++      catch { send(500, { message }); return undefined; }
++    };
+     try {
+       const url = new URL(req.url ?? "/", "http://localhost");
+       if (req.method !== "GET")
+         return send(405, { message: "method not allowed" });
+       if (url.pathname === "/openapi.json") return send(200, openApiDocument);
+       if (url.pathname === "/targets")
+-        return send(
++        return repositoryCall("failed to list targets", () => repo.listTargets()).then((targets) => targets === undefined ? undefined : send(
+           200,
+-          (await repo.listTargets()).map(({ id, name, url, enabled }) => ({
++          targets.map(({ id, name, url, enabled }) => ({
+             id,
+             name,
+             url,
+             enabled,
+           })),
+-        );
++        ));
+       if (url.pathname === "/status")
+-        return send(200, {
++        return repositoryCall("failed to read status", () => repo.listTargets()).then((targets) => targets === undefined ? undefined : send(200, {
+           ok: true,
+-          targets: (await repo.listTargets()).length,
+-        });
++          targets: targets.length,
++        }));
+       if (url.pathname === "/checks")
+-        return send(
++        return repositoryCall("failed to list checks", () => repo.listChecks()).then((checks) => checks === undefined ? undefined : send(
+           200,
+-          (await repo.listChecks()).map((c) => ({
++          checks.map((c) => ({
+             id: c.id,
+             targetId: c.targetId,
+             classification: c.classification._tag,
+           })),
+-        );
++        ));
+       if (url.pathname.startsWith("/incidents/")) {
+         const id = decodeURIComponent(url.pathname.slice(11));
+-        const i = await repo.getIncident(id);
+-        if (!incidentIdPattern.test(id))
++        const params = Schema.decodeUnknownOption(IncidentParams)({ id });
++        if (Option.isNone(params))
+           return send(400, { message: "invalid incident id" });
++        const i = await repositoryCall("failed to read incident", () => repo.getIncident(params.value.id));
++        if (res.writableEnded) return;
+         return i
+           ? send(200, {
+               id: i.id,
+@@ -57,6 +86,7 @@ export const createApiHandler =
+       return send(500, { message: "internal server error" });
+     }
+   };
++/** Compatibility adapter for cumulative tests that still use Node's callback server. */
+ export const startServer = (repo: CheckRepositoryShape, port = 0) =>
+   new Promise<{ server: http.Server; baseUrl: string }>((resolve, reject) => {
+     const server = http.createServer(
+@@ -69,4 +99,4 @@ export const startServer = (repo: CheckRepositoryShape, port = 0) =>
+       resolve({ server, baseUrl: `http://127.0.0.1:${a.port}` });
+     });
+   });
+-export const ServerLayer = startServer;
++export const ServerLayer = nodeServerLayer;
+diff --git a/src/repo/CheckRepository.ts b/src/repo/CheckRepository.ts
+index a785b97..0da6da8 100644
+--- a/src/repo/CheckRepository.ts
++++ b/src/repo/CheckRepository.ts
+@@ -11,6 +11,10 @@ import {
+ } from "../domain/schema.js";
+ import { RepositoryError } from "../domain/errors.js";
+ export type IncidentTransition = "Opened" | "Updated" | "Closed" | "Unchanged";
++export interface CheckApplication {
++  readonly transition: IncidentTransition;
++  readonly openIncident: Incident | undefined;
++}
+ export interface CheckRepositoryShape {
+   saveTarget(t: Target): Promise<void>;
+   listTargets(): Promise<readonly Target[]>;
+@@ -20,6 +24,7 @@ export interface CheckRepositoryShape {
+   getOpenIncident(id: TargetId): Promise<Incident | undefined>;
+   saveIncident(i: Incident): Promise<void>;
+   applyCheck(c: CheckResult): Promise<IncidentTransition>;
++  applyCheckWithIncident(c: CheckResult): Promise<CheckApplication>;
+ }
+ const compare = (a: string, b: string) =>
+   Buffer.compare(Buffer.from(a), Buffer.from(b));
+@@ -29,6 +34,7 @@ export class InMemoryCheckRepository implements CheckRepositoryShape {
+   private targets = new Map<string, Target>();
+   private checks = new Map<string, CheckResult>();
+   private incidents = new Map<string, Incident>();
++  private transitionQueue: Promise<void> = Promise.resolve();
+   async saveTarget(t: Target) {
+     this.targets.set(t.id, cloneTarget(t));
+   }
+@@ -72,6 +78,21 @@ export class InMemoryCheckRepository implements CheckRepositoryShape {
+     this.incidents.set(i.id, cloneIncident(i));
+   }
+   async applyCheck(c: CheckResult): Promise<IncidentTransition> {
++    return (await this.applyCheckWithIncident(c)).transition;
++  }
++  async applyCheckWithIncident(c: CheckResult): Promise<CheckApplication> {
++    const prior = this.transitionQueue;
++    let release!: () => void;
++    this.transitionQueue = new Promise<void>((resolve) => { release = resolve; });
++    await prior;
++    try {
++      const transition = this.applyCheckAtomically(c);
++      return { transition, openIncident: await this.getOpenIncident(c.targetId) };
++    } finally {
++      release();
++    }
++  }
++  private applyCheckAtomically(c: CheckResult): IncidentTransition {
+     let result: IncidentTransition = "Unchanged";
+     {
+       const old = this.checks.get(c.id);
+@@ -88,28 +109,27 @@ export class InMemoryCheckRepository implements CheckRepositoryShape {
+       );
+       this.checks.set(c.id, cloneCheck(c));
+       if (newer) return result;
+-      const open = await this.getOpenIncident(c.targetId);
++      const open = [...this.incidents.values()]
++        .filter((x) => x.targetId === c.targetId && x.status === "Open")
++        .sort((a, b) => b.openedAt.getTime() - a.openedAt.getTime() || compare(b.id, a.id))[0];
+       const bad = ["Down", "Slow", "InvalidResponse"].includes(
+         c.classification._tag,
+       );
+       if (bad) {
+         const reason = c.failure?.reason ?? c.classification._tag;
+         if (open) {
+-          await this.saveIncident(
+-            new Incident({ ...open, reason, latestCheckId: c.id }),
+-          );
++          this.incidents.set(open.id, new Incident({ ...open, reason, latestCheckId: c.id }));
+           result = "Updated";
+         } else {
+-          await this.saveIncident(
+-            new Incident({
++          const incident = new Incident({
+               id: `incident_${randomUUID()}`,
+               targetId: c.targetId,
+               openedAt: new Date(),
+               status: "Open",
+               reason,
+               latestCheckId: c.id,
+-            }),
+-          );
++            });
++          this.incidents.set(incident.id, incident);
+           result = "Opened";
+         }
+       } else if (c.classification._tag === "Up") {
+@@ -117,15 +137,15 @@ export class InMemoryCheckRepository implements CheckRepositoryShape {
+           (x) => x.targetId === c.targetId && x.status === "Open",
+         );
+         if (opens.length) {
+-          for (const i of opens)
+-            await this.saveIncident(
+-              new Incident({
++          for (const i of opens) {
++            const closed = new Incident({
+                 ...i,
+                 status: "Closed",
+                 closedAt: new Date(Math.max(Date.now(), i.openedAt.getTime())),
+                 latestCheckId: c.id,
+-              }),
+-            );
++              });
++            this.incidents.set(closed.id, closed);
++          }
+           result = "Closed";
+         }
+       }
+diff --git a/src/repo/SqliteCheckRepository.ts b/src/repo/SqliteCheckRepository.ts
+index 04b387e..2c546a4 100644
+--- a/src/repo/SqliteCheckRepository.ts
++++ b/src/repo/SqliteCheckRepository.ts
+@@ -1,180 +1,243 @@
+-import { DatabaseSync } from "node:sqlite";
+ import { randomUUID } from "node:crypto";
+-import { Equal } from "effect";
+-import { join } from "node:path";
++import { Buffer } from "node:buffer";
+ import { tmpdir } from "node:os";
+-import {
+-  CheckFailure,
+-  CheckResult,
+-  Down,
+-  Incident,
+-  InvalidResponse,
+-  ResponseMetadata,
+-  Slow,
+-  Target,
+-  Unknown,
+-  Up,
+-  type Classification,
+-  type TargetId,
+-} from "../domain/schema.js";
+-import {
+-  InMemoryCheckRepository,
+-  type CheckRepositoryShape,
+-  type IncidentTransition,
+-} from "./CheckRepository.js";
++import { join } from "node:path";
++import { SqliteClient } from "@effect/sql-sqlite-node";
++import { Effect, Equal, ManagedRuntime, Schema } from "effect";
++import { SqlClient } from "effect/unstable/sql";
+ import { RepositoryError } from "../domain/errors.js";
++import { CheckResult, Incident, Target, type TargetId } from "../domain/schema.js";
+ import { decodeStoredCheckSync, decodeStoredIncidentSync, decodeStoredTargetSync, encodeStoredCheck, encodeStoredTarget } from "../domain/storage.js";
+-const classes = { Up, Slow, Down, InvalidResponse, Unknown };
+-type Row = Record<string, unknown>;
++import type { CheckApplication, CheckRepositoryShape, IncidentTransition } from "./CheckRepository.js";
++
++type JsonRow = { readonly json: string };
++type IdRow = { readonly id: number };
++type CountRow = { readonly count: number };
++type TableName = "checks" | "incidents" | "incident_events" | "delivery_outbox";
++
++const JsonRow = Schema.Struct({ json: Schema.String });
++const IdRow = Schema.Struct({ id: Schema.Number });
++const OutboxRow = Schema.Struct({ id: Schema.Number, event_id: Schema.Number });
++
++const decodeRepository = <A>(operation: string, evaluate: () => A) => Effect.try({
++  try: evaluate,
++  catch: (cause) => new RepositoryError({ operation, cause }),
++});
++const decodeJsonRows = (operation: string, rows: ReadonlyArray<unknown>) =>
++  decodeRepository(operation, () => rows.map((row) => Schema.decodeUnknownSync(JsonRow)(row)));
++const decodeIdRows = (operation: string, rows: ReadonlyArray<unknown>) =>
++  decodeRepository(operation, () => rows.map((row) => Schema.decodeUnknownSync(IdRow)(row)));
++const decodeOutboxRows = (operation: string, rows: ReadonlyArray<unknown>) =>
++  decodeRepository(operation, () => rows.map((row) => Schema.decodeUnknownSync(OutboxRow)(row)));
++const newestIncidents = (operation: string, rows: ReadonlyArray<JsonRow>) =>
++  decodeRepository(operation, () => rows.map((row) => decodeStoredIncidentSync(JSON.parse(row.json))).sort((left, right) =>
++    right.openedAt.getTime() - left.openedAt.getTime() || Buffer.compare(Buffer.from(right.id), Buffer.from(left.id))
++  ));
++
++const encodeCheck = (check: CheckResult) => JSON.stringify(encodeStoredCheck(check));
++
++const equalCheck = (left: CheckResult, right: CheckResult) =>
++  Equal.equals(left, right);
++
++const badClassification = (check: CheckResult) =>
++  ["Down", "Slow", "InvalidResponse"].includes(check.classification._tag);
++
+ export const makeTempFilename = () =>
+-  join(
+-    tmpdir(),
+-    `beaconwatch-${process.pid}-${Date.now()}-${randomUUID()}.sqlite`,
+-  );
++  join(tmpdir(), `beaconwatch-${process.pid}-${Date.now()}-${randomUUID()}.sqlite`);
++
++/** The Promise facade used by the cumulative application. All database work is
++ * executed by the one scoped Effect SQL runtime owned by this repository. */
+ export class SqliteCheckRepository implements CheckRepositoryShape {
+-  readonly db: DatabaseSync;
+-  private memory = new InMemoryCheckRepository();
+-  constructor(
+-    filename = ":memory:",
+-    private readonly send: (eventId: number) => void | Promise<void> = () => {},
+-  ) {
+-    this.db = new DatabaseSync(filename);
+-    this.migrate();
++  private readonly runtime;
++  private readonly ready: Promise<void>;
++  private closed = false;
++
++  constructor(readonly filename = ":memory:") {
++    this.runtime = ManagedRuntime.make(SqliteClient.layer({ filename }));
++    this.ready = this.runtime.runPromise(this.migration.pipe(
++      Effect.mapError((cause) => new RepositoryError({ operation: "migration", cause })),
++    ));
+   }
+-  migrate() {
+-    this.db.exec(
+-      "create table if not exists targets(id text primary key,json text not null);create table if not exists checks(id text primary key,json text not null);create table if not exists incidents(id text primary key,json text not null);create table if not exists incident_events(id integer primary key autoincrement,incident_id text not null,check_id text not null,event_type text not null,created_at integer not null);create table if not exists delivery_outbox(id integer primary key autoincrement,event_id integer not null unique references incident_events(id),delivered_at integer)",
+-    );
++
++  private readonly migration = Effect.gen(function*() {
++    const sql = yield* SqlClient.SqlClient;
++    yield* sql`create table if not exists targets(id text primary key,json text not null)`;
++    yield* sql`create table if not exists checks(id text primary key,json text not null)`;
++    yield* sql`create table if not exists incidents(id text primary key,json text not null)`;
++    yield* sql`create table if not exists incident_events(id integer primary key autoincrement,incident_id text not null,check_id text not null,event_type text not null,created_at integer not null)`;
++    yield* sql`create table if not exists delivery_outbox(id integer primary key autoincrement,event_id integer not null unique references incident_events(id),delivered_at integer)`;
++  });
++
++  private async run<A>(operation: string, effect: Effect.Effect<A, unknown, SqlClient.SqlClient>): Promise<A> {
++    if (this.closed) throw new RepositoryError({ operation, cause: new Error("repository closed") });
++    await this.ready;
++    return this.runtime.runPromise(effect.pipe(
++      Effect.mapError((cause) => cause instanceof RepositoryError ? cause : new RepositoryError({ operation, cause })),
++    ));
+   }
+-  private target(s: string) {
+-    return decodeStoredTargetSync(JSON.parse(s));
++
++  /** Executes test/setup DDL through the repository's actual SqlClient. */
++  execute(statement: string): Promise<void> {
++    return this.run("execute", Effect.gen(function*() {
++      const sql = yield* SqlClient.SqlClient;
++      yield* sql.unsafe(statement);
++    }));
+   }
+-  private check(s: string) {
+-    return decodeStoredCheckSync(JSON.parse(s));
++
++  countRows(table: TableName): Promise<number> {
++    return this.run("countRows", Effect.gen(function*() {
++      const sql = yield* SqlClient.SqlClient;
++      const rows = yield* sql.unsafe<CountRow>(`select count(*) as count from ${table}`);
++      return Number(rows[0]?.count ?? 0);
++    }));
+   }
+-  private incident(s: string) {
+-    return decodeStoredIncidentSync(JSON.parse(s));
++
++  async saveTarget(target: Target): Promise<void> {
++    return this.run("saveTarget", Effect.gen(function*() {
++      const sql = yield* SqlClient.SqlClient;
++      yield* sql`insert into targets(id,json) values(${target.id},${JSON.stringify(encodeStoredTarget(target))}) on conflict(id) do update set json=excluded.json`;
++    }));
+   }
+-  async saveTarget(t: Target) {
+-    this.db
+-      .prepare(
+-        "insert into targets values(?,?) on conflict(id) do update set json=excluded.json",
+-      )
+-      .run(t.id, JSON.stringify(encodeStoredTarget(t)));
++
++  async listTargets(): Promise<readonly Target[]> {
++    return this.run("listTargets", Effect.gen(function*() {
++      const sql = yield* SqlClient.SqlClient;
++      const rows = yield* decodeJsonRows("listTargets", yield* sql<JsonRow>`select json from targets order by id`);
++      return yield* decodeRepository("listTargets", () => rows.map((row) => decodeStoredTargetSync(JSON.parse(row.json))));
++    }));
+   }
+-  async listTargets() {
+-    return (
+-      this.db.prepare("select json from targets order by id").all() as Row[]
+-    ).map((r) => this.target(String(r.json)));
++
++  async saveCheck(check: CheckResult): Promise<void> {
++    return this.run("saveCheck", Effect.gen(function*() {
++      const sql = yield* SqlClient.SqlClient;
++      yield* sql.withTransaction(Effect.gen(function*() {
++        const existing = (yield* decodeJsonRows("saveCheck", yield* sql<JsonRow>`select json from checks where id=${check.id}`))[0];
++        if (existing) {
++          const stored = yield* decodeRepository("saveCheck", () => decodeStoredCheckSync(JSON.parse(existing.json)));
++          if (!equalCheck(stored, check))
++            return yield* Effect.fail(new RepositoryError({ operation: "saveCheck", cause: `check id ${check.id} already has different contents` }));
++          return;
++        }
++        yield* sql`insert into checks(id,json) values(${check.id},${encodeCheck(check)})`;
++      }));
++    }));
+   }
+-  async saveCheck(c: CheckResult) {
+-    const row = this.db
+-      .prepare("select json from checks where id=?")
+-      .get(c.id) as Row | undefined;
+-    if (row) {
+-      const old = this.check(String(row.json));
+-      if (!Equal.equals(old, c))
+-        throw new RepositoryError({
+-          operation: "saveCheck",
+-          cause: "conflicting check id",
+-        });
+-      return;
+-    }
+-    this.db
+-      .prepare("insert into checks values(?,?)")
+-      .run(c.id, JSON.stringify(encodeStoredCheck(c)));
++
++  async listChecks(targetId?: TargetId): Promise<readonly CheckResult[]> {
++    return this.run("listChecks", Effect.gen(function*() {
++      const sql = yield* SqlClient.SqlClient;
++      const raw = targetId
++        ? yield* sql<JsonRow>`select json from checks where json_extract(json,'$.targetId')=${targetId}`
++        : yield* sql<JsonRow>`select json from checks`;
++      const rows = yield* decodeJsonRows("listChecks", raw);
++      const checks = yield* decodeRepository("listChecks", () => rows.map((row) => decodeStoredCheckSync(JSON.parse(row.json))));
++      return checks.sort((left, right) =>
++        left.checkedAt.getTime() - right.checkedAt.getTime() || Buffer.compare(Buffer.from(left.id), Buffer.from(right.id))
++      );
++    }));
+   }
+-  async listChecks(id?: TargetId) {
+-    const rows = (
+-      id
+-        ? this.db
+-            .prepare(
+-              "select json from checks where json_extract(json,'$.targetId')=? order by json_extract(json,'$.checkedAt'),id",
+-            )
+-            .all(id)
+-        : this.db
+-            .prepare(
+-              "select json from checks order by json_extract(json,'$.checkedAt'),id",
+-            )
+-            .all()
+-    ) as Row[];
+-    return rows.map((r) => this.check(String(r.json)));
++
++  async getIncident(id: string): Promise<Incident | undefined> {
++    return this.run("getIncident", Effect.gen(function*() {
++      const sql = yield* SqlClient.SqlClient;
++      const row = (yield* decodeJsonRows("getIncident", yield* sql<JsonRow>`select json from incidents where id=${id}`))[0];
++      return row && (yield* decodeRepository("getIncident", () => decodeStoredIncidentSync(JSON.parse(row.json))));
++    }));
+   }
+-  async getIncident(id: string) {
+-    const r = this.db
+-      .prepare("select json from incidents where id=?")
+-      .get(id) as Row | undefined;
+-    return r ? this.incident(String(r.json)) : undefined;
++
++  async getOpenIncident(targetId: TargetId): Promise<Incident | undefined> {
++    return this.run("getOpenIncident", Effect.gen(function*() {
++      const sql = yield* SqlClient.SqlClient;
++      const rows = yield* decodeJsonRows("getOpenIncident", yield* sql<JsonRow>`select json from incidents where json_extract(json,'$.targetId')=${targetId} and json_extract(json,'$.status')='Open'`);
++      return (yield* newestIncidents("getOpenIncident", rows))[0];
++    }));
+   }
+-  async getOpenIncident(id: TargetId) {
+-    const r = this.db
+-      .prepare(
+-        "select json from incidents where json_extract(json,'$.targetId')=? and json_extract(json,'$.status')='Open' order by json_extract(json,'$.openedAt') desc,id desc limit 1",
+-      )
+-      .get(id) as Row | undefined;
+-    return r ? this.incident(String(r.json)) : undefined;
++
++  async saveIncident(incident: Incident): Promise<void> {
++    return this.run("saveIncident", Effect.gen(function*() {
++      const sql = yield* SqlClient.SqlClient;
++      yield* sql`insert into incidents(id,json) values(${incident.id},${JSON.stringify(incident)}) on conflict(id) do update set json=excluded.json`;
++    }));
+   }
+-  async saveIncident(i: Incident) {
+-    this.db
+-      .prepare(
+-        "insert into incidents values(?,?) on conflict(id) do update set json=excluded.json",
+-      )
+-      .run(i.id, JSON.stringify(i));
++
++  async applyCheck(check: CheckResult): Promise<IncidentTransition> {
++    return (await this.applyCheckWithIncident(check)).transition;
+   }
+-  async applyCheck(c: CheckResult): Promise<IncidentTransition> {
+-    const targets = await this.listTargets();
+-    const checks = await this.listChecks();
+-    for (const t of targets) await this.memory.saveTarget(t);
+-    for (const x of checks) await this.memory.saveCheck(x);
+-    for (const r of this.db
+-      .prepare("select json from incidents")
+-      .all() as Row[])
+-      await this.memory.saveIncident(this.incident(String(r.json)));
+-    const transition = await this.memory.applyCheck(c);
+-    await this.saveCheck(c);
+-    const open = await this.memory.getOpenIncident(c.targetId);
+-    if (open) await this.saveIncident(open);
+-    if (transition === "Closed") {
+-      for (const row of this.db
+-        .prepare("select json from incidents")
+-        .all() as Row[]) {
+-        const i = this.incident(String(row.json));
+-        const updated = await this.memory.getIncident(i.id);
+-        if (updated) await this.saveIncident(updated);
+-      }
+-    }
+-    if (transition !== "Unchanged") {
+-      const incidents = this.db.prepare("select id from incidents where json_extract(json,'$.latestCheckId')=? order by id").all(c.id) as Row[];
+-      for (const incident of incidents) {
+-        for (let attempt = 0; attempt < 2; attempt++) {
+-          this.db.exec("begin");
+-          try {
+-            const event = this.db.prepare("insert into incident_events(incident_id,check_id,event_type,created_at) values(?,?,?,?) returning id")
+-              .get(String(incident.id), c.id, transition, Date.now()) as { id: number };
+-            await this.send(event.id);
+-            this.db.prepare("insert into delivery_outbox(event_id) values(?)").run(event.id);
+-            this.db.exec("commit");
+-            break;
+-          } catch (error) {
+-            this.db.exec("rollback");
+-            if (attempt === 1) throw error;
++
++  async applyCheckWithIncident(check: CheckResult): Promise<CheckApplication> {
++    return this.run("applyCheck", Effect.gen(function*() {
++      const sql = yield* SqlClient.SqlClient;
++      return yield* sql.withTransaction(Effect.gen(function*() {
++        const oldRow = (yield* decodeJsonRows("applyCheck", yield* sql<JsonRow>`select json from checks where id=${check.id}`))[0];
++        if (oldRow) {
++          const stored = yield* decodeRepository("applyCheck", () => decodeStoredCheckSync(JSON.parse(oldRow.json)));
++          if (!equalCheck(stored, check))
++            return yield* Effect.fail(new RepositoryError({ operation: "saveCheck", cause: `check id ${check.id} already has different contents` }));
++          const openRows = yield* decodeJsonRows("applyCheck", yield* sql<JsonRow>`select json from incidents where json_extract(json,'$.targetId')=${check.targetId} and json_extract(json,'$.status')='Open'`);
++          return { transition: "Unchanged" as const, openIncident: (yield* newestIncidents("applyCheck", openRows))[0] };
++        }
++
++        yield* sql`insert into checks(id,json) values(${check.id},${encodeCheck(check)})`;
++        const targetRows = yield* decodeJsonRows("applyCheck", yield* sql<JsonRow>`select json from checks where json_extract(json,'$.targetId')=${check.targetId}`);
++        const targetChecks = yield* decodeRepository("applyCheck", () => targetRows.map((row) => decodeStoredCheckSync(JSON.parse(row.json))));
++        const hasNewer = targetChecks.some((stored) => stored.checkedAt.getTime() > check.checkedAt.getTime());
++        let transition: IncidentTransition = "Unchanged";
++        const eventIncidentIds: string[] = [];
++
++        if (!hasNewer) {
++          const openRows = yield* decodeJsonRows("applyCheck", yield* sql<JsonRow>`select json from incidents where json_extract(json,'$.targetId')=${check.targetId} and json_extract(json,'$.status')='Open'`);
++          const opens = yield* newestIncidents("applyCheck", openRows);
++          if (badClassification(check)) {
++            const reason = check.failure?.reason ?? check.classification._tag;
++            if (opens[0]) {
++              const updated = new Incident({ ...opens[0], reason, latestCheckId: check.id });
++              yield* sql`update incidents set json=${JSON.stringify(updated)} where id=${updated.id}`;
++              eventIncidentIds.push(updated.id);
++              transition = "Updated";
++            } else {
++              const opened = new Incident({ id: `incident_${randomUUID()}`, targetId: check.targetId, openedAt: new Date(), status: "Open", reason, latestCheckId: check.id });
++              yield* sql`insert into incidents(id,json) values(${opened.id},${JSON.stringify(opened)})`;
++              eventIncidentIds.push(opened.id);
++              transition = "Opened";
++            }
++          } else if (check.classification._tag === "Up" && opens.length > 0) {
++            for (const incident of opens) {
++              const closed = new Incident({ ...incident, status: "Closed", closedAt: new Date(Math.max(Date.now(), incident.openedAt.getTime())), latestCheckId: check.id });
++              yield* sql`update incidents set json=${JSON.stringify(closed)} where id=${closed.id}`;
++              eventIncidentIds.push(closed.id);
++            }
++            transition = "Closed";
+           }
+         }
+-      }
+-    }
+-    return transition;
++
++        for (const incidentId of eventIncidentIds) {
++          const eventRows = yield* decodeIdRows("applyCheck", yield* sql<IdRow>`insert into incident_events(incident_id,check_id,event_type,created_at) values(${incidentId},${check.id},${transition},${Date.now()}) returning id`);
++          yield* sql`insert into delivery_outbox(event_id) values(${eventRows[0]!.id})`;
++        }
++        const openRows = yield* decodeJsonRows("applyCheck", yield* sql<JsonRow>`select json from incidents where json_extract(json,'$.targetId')=${check.targetId} and json_extract(json,'$.status')='Open'`);
++        return { transition, openIncident: (yield* newestIncidents("applyCheck", openRows))[0] };
++      }));
++    }));
+   }
+-  async deliverPending(send: (eventId: number) => void | Promise<void>) {
+-    const rows = this.db.prepare("select id,event_id from delivery_outbox where delivered_at is null order by id").all() as Array<{ id: number; event_id: number }>;
+-    for (const row of rows) {
+-      await send(row.event_id);
+-      this.db.prepare("update delivery_outbox set delivered_at=? where id=? and delivered_at is null").run(Date.now(), row.id);
+-    }
++
++  async deliverPending(send: (eventId: number) => void | Promise<void>): Promise<void> {
++    return this.run("deliverPending", Effect.gen(function*() {
++      const sql = yield* SqlClient.SqlClient;
++      const rows = yield* decodeOutboxRows("deliverPending", yield* sql`select id,event_id from delivery_outbox where delivered_at is null order by id`);
++      for (const row of rows) {
++        yield* Effect.tryPromise(() => Promise.resolve(send(row.event_id)));
++        yield* sql`update delivery_outbox set delivered_at=${Date.now()} where id=${row.id} and delivered_at is null`;
++      }
++    }));
+   }
+-  close() {
+-    this.db.close();
++
++  async close(): Promise<void> {
++    if (this.closed) return;
++    this.closed = true;
++    await this.ready.catch(() => undefined);
++    await this.runtime.dispose();
+   }
+ }
+-export const migrate = (r: SqliteCheckRepository) => r.migrate();
+-export const layerForFile = (f: string) => new SqliteCheckRepository(f);
++
++export const layerForFile = (filename: string) => new SqliteCheckRepository(filename);
+ export const tempLayer = () => layerForFile(makeTempFilename());
+diff --git a/src/services/DigestService.ts b/src/services/DigestService.ts
+index e79e45a..b299892 100644
+--- a/src/services/DigestService.ts
++++ b/src/services/DigestService.ts
+@@ -14,7 +14,7 @@ import {
+   targetId,
+   type TargetId,
+ } from "../domain/schema.js";
+-import { decodeStoredCheck } from "../domain/storage.js";
++import { decodeHistoryCheck } from "../domain/history-wire.js";
+ export class MalformedHistoryRow extends Error {
+   readonly _tag = "MalformedHistoryRow";
+   constructor(
+@@ -40,7 +40,7 @@ export interface Digest {
+ const classes = { Up, Slow, Down, InvalidResponse, Unknown };
+ export const decodeHistoryLine = async (line: string, lineNo: number) => {
+   try {
+-    const decoded = await Effect.runPromise(decodeStoredCheck(JSON.parse(line)));
++    const decoded = await Effect.runPromise(decodeHistoryCheck(JSON.parse(line)));
+     return decoded;
+   } catch (e) {
+     throw new MalformedHistoryRow(lineNo, String(e));
+diff --git a/src/stm/StatusBoard.ts b/src/stm/StatusBoard.ts
+index 798806b..fca662f 100644
+--- a/src/stm/StatusBoard.ts
++++ b/src/stm/StatusBoard.ts
+@@ -1,71 +1,89 @@
+-import type { TargetId } from "../domain/schema.js";
++import { Effect, HashMap, Option, TxRef } from "effect"
++import type { TargetId } from "../domain/schema.js"
++
+ export interface StatusBoardSnapshot {
+-  globalDegradedCount: number;
+-  tagDegradedCounts: ReadonlyMap<string, number>;
++  readonly globalDegradedCount: number
++  readonly tagDegradedCounts: ReadonlyMap<string, number>
+ }
+-export class StatusBoard {
+-  private targets = new Map<TargetId, string>();
+-  private tags = new Map<string, number>();
+-  private async atomic(work: () => void) { await Promise.resolve(); work(); }
+-  async openIncident(id: TargetId, tag: string, afterTargetWrite?: () => Promise<void>) {
+-    await Promise.resolve();
+-    const old = this.targets.get(id);
+-    if (old === tag) return;
+-    if (old) this.bump(old, -1);
+-    this.targets.set(id, tag);
+-    await afterTargetWrite?.();
+-    this.bump(tag, 1);
+-  }
+-  closeIncident(id: TargetId) {
+-    return this.atomic(() => {
+-      const old = this.targets.get(id);
+-      if (!old) return;
+-      this.targets.delete(id);
+-      this.bump(old, -1);
+-    });
+-  }
+-  private bump(tag: string, n: number) {
+-    const x = (this.tags.get(tag) ?? 0) + n;
+-    x ? this.tags.set(tag, x) : this.tags.delete(tag);
+-  }
+-  async snapshot() {
+-    return {
+-      globalDegradedCount: this.targets.size,
+-      tagDegradedCounts: new Map(this.tags),
+-    };
+-  }
++
++export interface StatusBoard {
++  readonly openIncident: (targetId: TargetId, tag: string) => Effect.Effect<void>
++  readonly openIncidentWhen: (targetId: TargetId, tag: string, gate: TxRef.TxRef<boolean>, afterCommit: Effect.Effect<void, never, never>) => Effect.Effect<void>
++  readonly closeIncident: (targetId: TargetId) => Effect.Effect<void>
++  readonly snapshot: Effect.Effect<StatusBoardSnapshot>
+ }
+-export const retriedUpdate = async (board: StatusBoard, id: TargetId, tag: string, notify: () => void) => {
+-  let version = 0;
+-  const transaction = async () => {
+-    const observed = version;
+-    notify();
+-    await Promise.resolve();
+-    if (observed !== version) return false;
+-    await board.openIncident(id, tag);
+-    return true;
+-  };
+-  const first = transaction();
+-  version++;
+-  if (!await first) await transaction();
+-};
+-export const snapshotDuringAbort = async (
++
++interface TargetStatus {
++  readonly tag: string
++}
++
++/** Related counters change in one transaction; irreversible work belongs after commit. */
++export const make = Effect.gen(function*() {
++  const targetStatuses = yield* TxRef.make(HashMap.empty<TargetId, TargetStatus>())
++  const tagCounts = yield* TxRef.make(HashMap.empty<string, number>())
++  const globalCount = yield* TxRef.make(0)
++
++  const getCount = (counts: HashMap.HashMap<string, number>, tag: string) =>
++    Option.getOrElse(HashMap.get(counts, tag), () => 0)
++
++  const incrementTag = (tag: string) => TxRef.update(tagCounts, (counts) =>
++    HashMap.set(counts, tag, getCount(counts, tag) + 1)
++  )
++  const decrementTag = (tag: string) => TxRef.update(tagCounts, (counts) => {
++    const current = getCount(counts, tag)
++    return current <= 1 ? HashMap.remove(counts, tag) : HashMap.set(counts, tag, current - 1)
++  })
++
++  const openIncident = (targetId: TargetId, tag: string) => Effect.tx(Effect.gen(function*() {
++    const statuses = yield* TxRef.get(targetStatuses)
++    const existing = HashMap.get(statuses, targetId)
++    if (existing._tag === "Some") {
++      if (existing.value.tag === tag) return
++      yield* decrementTag(existing.value.tag)
++    } else {
++      yield* TxRef.update(globalCount, (n) => n + 1)
++    }
++    yield* incrementTag(tag)
++    yield* TxRef.set(targetStatuses, HashMap.set(statuses, targetId, { tag }))
++  })).pipe(Effect.andThen(Effect.void))
++
++  const openIncidentWhen = (targetId: TargetId, tag: string, gate: TxRef.TxRef<boolean>, afterCommit: Effect.Effect<void, never, never>) =>
++    Effect.tx(Effect.gen(function*() {
++      if (!(yield* TxRef.get(gate))) return yield* Effect.txRetry
++      const statuses = yield* TxRef.get(targetStatuses)
++      const existing = HashMap.get(statuses, targetId)
++      if (existing._tag === "Some") {
++        if (existing.value.tag === tag) return
++        yield* decrementTag(existing.value.tag)
++      } else {
++        yield* TxRef.update(globalCount, (n) => n + 1)
++      }
++      yield* incrementTag(tag)
++      yield* TxRef.set(targetStatuses, HashMap.set(statuses, targetId, { tag }))
++    })).pipe(Effect.andThen(afterCommit))
++
++  const closeIncident = (targetId: TargetId) => Effect.tx(Effect.gen(function*() {
++    const statuses = yield* TxRef.get(targetStatuses)
++    const existing = HashMap.get(statuses, targetId)
++    if (existing._tag === "None") return
++    yield* decrementTag(existing.value.tag)
++    yield* TxRef.update(globalCount, (n) => n - 1)
++    yield* TxRef.set(targetStatuses, HashMap.remove(statuses, targetId))
++  })).pipe(Effect.andThen(Effect.void))
++
++  const snapshot = Effect.tx(Effect.gen(function*() {
++    const globalDegradedCount = yield* TxRef.get(globalCount)
++    const counts = yield* TxRef.get(tagCounts)
++    return { globalDegradedCount, tagDegradedCounts: new Map(HashMap.toEntries(counts)) }
++  }))
++
++  return { openIncident, openIncidentWhen, closeIncident, snapshot } satisfies StatusBoard
++})
++
++/** Compatibility seam for hosts migrating optimistic callbacks to STM. */
++export const retriedUpdate = (
+   board: StatusBoard,
+-  id: TargetId,
++  targetId: TargetId,
+   tag: string,
+-  signal: AbortSignal,
+-) => {
+-  let rejectGate!: (reason?: unknown) => void;
+-  const gate = new Promise<void>((_, reject) => { rejectGate = reject; });
+-  const write = board.openIncident(id, tag, () => gate);
+-  await Promise.resolve();
+-  const observed = await board.snapshot();
+-  if (signal.aborted) rejectGate(signal.reason);
+-  else await new Promise<void>((resolve) => signal.addEventListener("abort", () => {
+-    rejectGate(signal.reason);
+-    resolve();
+-  }, { once: true }));
+-  await write;
+-  return observed;
+-};
+-export const make = async () => new StatusBoard();
++  notify: () => void,
++) => board.openIncident(targetId, tag).pipe(Effect.andThen(Effect.sync(notify)))
+diff --git a/src/watch/Scheduler.ts b/src/watch/Scheduler.ts
+index 8554e1a..7520525 100644
+--- a/src/watch/Scheduler.ts
++++ b/src/watch/Scheduler.ts
+@@ -1,4 +1,4 @@
+-import { ConfigError } from "../domain/errors.js";
++import { ConfigError, RepositoryError } from "../domain/errors.js";
+ import type { Target, TargetConfig } from "../domain/schema.js";
+ import { probeOnce } from "../probe/ProbeProgram.js";
+ import type { ProbeClientShape } from "../services/ProbeClient.js";
+@@ -48,12 +48,13 @@ export function runOnceEffect(
+   options: SchedulerOptions,
+   s: SchedulerServices,
+ ) {
++  const applyCheckWithIncident = s.repository.applyCheckWithIncident?.bind(s.repository) ??
++    (async (check) => ({ transition: await s.repository.applyCheck(check), openIncident: undefined }));
+   const consume = (queue: Queue.Dequeue<Target | TargetConfig, Cause.Done>) => Effect.forever(Effect.gen(function*() {
+     const target = yield* Queue.take(queue);
+     const check = yield* probeOnce(target, s.client);
+-    yield* awaitPromise(() => s.repository.applyCheck(check));
+-    const incident = yield* awaitPromise(() => s.repository.getOpenIncident(check.targetId));
+-    yield* awaitPromise(() => s.status.update(check, incident));
++    const applied = yield* awaitPromise(() => applyCheckWithIncident(check), (cause): cause is RepositoryError => cause instanceof RepositoryError);
++    yield* awaitPromise(() => s.status.update(check, applied.openIncident));
+   })).pipe(Effect.catchIf(Cause.isDone, () => Effect.void));
+   return Effect.scoped(Effect.gen(function*() {
+     yield* validateEffect(options);
+@@ -73,6 +74,8 @@ export function watchLoopEffect(
+   options: SchedulerOptions,
+   s: SchedulerServices,
+ ) {
++  const applyCheckWithIncident = s.repository.applyCheckWithIncident?.bind(s.repository) ??
++    (async (check) => ({ transition: await s.repository.applyCheck(check), openIncident: undefined }));
+   const active = targets.filter(enabled);
+   return Effect.scoped(Effect.gen(function*() {
+     yield* validateEffect(options);
+@@ -80,9 +83,8 @@ export function watchLoopEffect(
+     const consume = Effect.forever(Effect.gen(function*() {
+       const target = yield* Queue.take(queue);
+       const check = yield* probeOnce(target, s.client);
+-      yield* awaitPromise(() => s.repository.applyCheck(check));
+-      const incident = yield* awaitPromise(() => s.repository.getOpenIncident(check.targetId));
+-      yield* awaitPromise(() => s.status.update(check, incident));
++      const applied = yield* awaitPromise(() => applyCheckWithIncident(check), (cause): cause is RepositoryError => cause instanceof RepositoryError);
++      yield* awaitPromise(() => s.status.update(check, applied.openIncident));
+     }));
+     yield* Effect.all([
+       ...Array.from({ length: options.workerCount }, () => consume),
+diff --git a/test/checkpoint-11/storage-model.test.ts b/test/checkpoint-11/storage-model.test.ts
+index 4113299..530ac3f 100644
+--- a/test/checkpoint-11/storage-model.test.ts
++++ b/test/checkpoint-11/storage-model.test.ts
+@@ -1,85 +1,106 @@
+-import { expect, it } from "vitest"
+-import { Duration, Effect, Equal, Schema } from "effect"
+-import { InMemoryCheckRepository } from "../../src/repo/CheckRepository.js"
+-import { digestFromStream } from "../../src/services/DigestService.js"
+-import { appConfig } from "../../src/services/Config.js"
++import { describe, expect, it } from "vitest";
++import { Duration, Effect, Equal, Schema } from "effect";
++import { targetJsonSchemaDocument } from "../../src/domain/json-schema.js";
++import { CheckResult, decodeTargetConfig, Target, TargetConfig, targetId } from "../../src/domain/schema.js";
++import { decodeStoredCheck, StoredCheck, storedCheckJsonSchema } from "../../src/domain/storage.js";
++import { InMemoryCheckRepository } from "../../src/repo/CheckRepository.js";
++import { SqliteCheckRepository } from "../../src/repo/SqliteCheckRepository.js";
++import { appConfig } from "../../src/services/Config.js";
++import { digestFromStream } from "../../src/services/DigestService.js";
+
+-const valid = { id: "check_1", targetId: "target_api", checkedAt: "2026-01-01T00:00:00.000Z", durationMillis: 12, classification: { _tag: "Up" }, response: {} }
++const valid = { id: "check_1", targetId: "target_api", checkedAt: "2026-01-01T00:00:00.000Z", durationMillis: 12, classification: { _tag: "Up" }, response: {} };
++describe("schema-backed storage model", () => {
++  it("compares checks by domain value rather than duration encoding", async () => {
++    const check = await Effect.runPromise(decodeStoredCheck(valid));
++    const equivalent = new CheckResult({ ...check, duration: Duration.nanos(12_000_000n) });
++    const adjacent = new CheckResult({ ...check, duration: Duration.nanos(12_000_001n) });
++    const memory = new InMemoryCheckRepository();
++    await memory.saveCheck(check);
++    await expect(memory.saveCheck(equivalent)).resolves.toBeUndefined();
++    await expect(memory.applyCheck(equivalent)).resolves.toBe("Unchanged");
++    await expect(memory.saveCheck(adjacent)).rejects.toMatchObject({ operation: "saveCheck" });
++    await expect(digestFromStream([check, equivalent])).resolves.toMatchObject({ malformedRows: 0, targets: [{ checks: 1 }] });
++    await expect(digestFromStream([check, adjacent])).resolves.toMatchObject({ malformedRows: 1, targets: [] });
+
+-it("derives storage and target wire contracts without losing explicit values", async () => {
+-  const storage = await import("../../src/domain/" + "storage.js").catch(() => undefined)
+-  const schema = await import("../../src/domain/" + "schema.js")
+-  const jsonSchema = await import("../../src/domain/" + "json-schema.js").catch(() => undefined)
+-  expect(storage, "implement the schema-backed storage boundary").toBeDefined()
+-  expect(jsonSchema, "derive the public target JSON Schema").toBeDefined()
+-  const { decodeStoredCheck, StoredCheck, storedCheckJsonSchema } = storage!
+-  const { decodeTargetConfig, TargetConfig } = schema as any
+-  const domain: any = await Effect.runPromise(decodeStoredCheck(valid) as any)
+-  expect(domain.checkedAt).toBeInstanceOf(Date)
+-  const equivalent = new (schema as any).CheckResult({ ...domain, duration: Duration.nanos(12_000_000n) })
+-  const adjacent = new (schema as any).CheckResult({ ...domain, duration: Duration.nanos(12_000_001n) })
+-  const memory = new InMemoryCheckRepository()
+-  await memory.saveCheck(domain)
+-  await expect(memory.saveCheck(equivalent)).resolves.toBeUndefined()
+-  await expect(memory.applyCheck(equivalent)).resolves.toBe("Unchanged")
+-  await expect(memory.saveCheck(adjacent)).rejects.toMatchObject({ operation: "saveCheck" })
+-  await expect(digestFromStream([domain, equivalent])).resolves.toMatchObject({ malformedRows: 0, targets: [{ checks: 1 }] })
+-  await expect(digestFromStream([domain, adjacent])).resolves.toMatchObject({ malformedRows: 1, targets: [] })
+-  const row = await Effect.runPromise(Schema.decodeUnknownEffect(StoredCheck)(valid) as any)
+-  expect(await Effect.runPromise(Schema.encodeEffect(StoredCheck)(row) as any)).toEqual(valid)
+-  const { response: _response, ...withoutResponse } = valid
+-  expect(((await Effect.runPromise(Schema.decodeUnknownEffect(StoredCheck)(withoutResponse) as any)) as any).response).toBeUndefined()
+-  await expect(Effect.runPromise(decodeStoredCheck({ ...valid, durationMillis: 0 }))).rejects.toThrow("durationMillis")
+-  await expect(Effect.runPromise(decodeStoredCheck({ ...valid, targetId: 4 }))).rejects.toThrow("targetId")
+-  expect(JSON.stringify(storedCheckJsonSchema)).toContain("durationMillis")
++    const sql = new SqliteCheckRepository();
++    try {
++      await sql.saveCheck(check);
++      await expect(sql.saveCheck(equivalent)).resolves.toBeUndefined();
++      await expect(sql.applyCheck(equivalent)).resolves.toBe("Unchanged");
++      await expect(sql.saveCheck(adjacent)).rejects.toMatchObject({ operation: "saveCheck" });
++      const legacy = JSON.stringify({ ...valid, id: "check_equivalent_legacy", duration: 7, durationMillis: undefined });
++      await sql.execute(`insert into checks(id,json) values('check_equivalent_legacy','${legacy.replaceAll("'", "''")}')`);
++      const equivalentLegacy = new CheckResult({ ...check, id: "check_equivalent_legacy", duration: Duration.nanos(7_000_000n) });
++      await expect(sql.saveCheck(equivalentLegacy)).resolves.toBeUndefined();
++    } finally { await sql.close(); }
++  });
+
+-  const encoded = { id: "target_api", name: " API ", url: "https://example.test", method: "GET", expectedStatus: [200], interval: "1 second", timeout: "2 seconds", slowThreshold: "3 seconds" } as const
+-  const target: any = await Effect.runPromise(decodeTargetConfig(encoded) as any)
+-  expect([target.name, Duration.toMillis(target.interval), Duration.toMillis(target.timeout), Duration.toMillis(target.slowThreshold)]).toEqual(["API", 1000, 2000, 3000])
+-  const roundTrip = await Effect.runPromise(Schema.encodeEffect(TargetConfig)(target) as any) as any
+-  expect([roundTrip.interval, roundTrip.timeout, roundTrip.slowThreshold]).toEqual([1000, 2000, 3000])
+-  const decodedAgain: any = await Effect.runPromise(decodeTargetConfig(JSON.parse(JSON.stringify(roundTrip))) as any)
+-  expect([decodedAgain.interval, decodedAgain.timeout, decodedAgain.slowThreshold].every(Duration.isDuration)).toBe(true)
+-  expect(() => new TargetConfig(encoded as any)).toThrow()
+-  expect(JSON.stringify(jsonSchema!.targetJsonSchemaDocument)).toContain("slowThreshold")
+-
+-  const canonical = { id: "target_api", name: "API", url: "https://example.test", method: "GET", expectedStatus: [200], interval: Duration.nanos(500_000n), timeout: Duration.nanos(500_000n), slowThreshold: Duration.nanos(500_000n), enabled: true }
+-  expect(() => new (schema as any).Target(canonical)).not.toThrow()
+-  for (const field of ["interval", "timeout", "slowThreshold"] as const) {
+-    expect(() => new (schema as any).Target({ ...canonical, [field]: Duration.zero }), field).toThrow()
+-    expect(() => new (schema as any).Target({ ...canonical, [field]: Duration.millis(-1) }), field).toThrow()
+-  }
+-  const infinite = new (schema as any).Target({ ...canonical, id: "target_infinite", interval: Duration.infinity, timeout: Duration.infinity, slowThreshold: Duration.infinity })
+-
+-  const { SqliteCheckRepository } = await import("../../src/repo/" + "SqliteCheckRepository.js")
+-  const repo: any = new SqliteCheckRepository()
+-  try {
+-    await repo.saveCheck(domain)
+-    await repo.saveCheck(domain)
+-    const infiniteCheck = new (schema as any).CheckResult({ ...domain, id: "check_infinite", duration: Duration.infinity })
+-    await repo.saveCheck(infiniteCheck)
+-    await repo.saveCheck(infiniteCheck)
+-    await repo.saveTarget(infinite)
+-    const legacyTarget = { id: "target_legacy", name: "Legacy", url: "https://legacy.example.test", method: "GET", expectedStatus: [200], interval: 4, timeout: 5, slowThreshold: 6, enabled: true }
+-    if (typeof repo.execute === "function") await repo.execute(`insert into targets(id,json) values('target_legacy','${JSON.stringify(legacyTarget).replaceAll("'", "''")}')`)
+-    else repo.db.prepare("insert into targets values(?,?)").run("target_legacy", JSON.stringify(legacyTarget))
+-    const legacy = JSON.stringify({ ...valid, id: "check_legacy", duration: 7, durationMillis: undefined })
+-    if (typeof repo.execute === "function") await repo.execute(`insert into checks(id,json) values('check_legacy','${legacy.replaceAll("'", "''")}')`)
+-    else repo.db.prepare("insert into checks values(?,?)").run("check_legacy", legacy)
+-    const equivalentLegacy = new (schema as any).CheckResult({ ...domain, id: "check_legacy", duration: Duration.nanos(7_000_000n) })
+-    await expect(repo.saveCheck(equivalentLegacy)).resolves.toBeUndefined()
+-    const precise = new (schema as any).CheckResult({ ...domain, id: "check_precise", duration: Duration.nanos(9_007_199_254_740_993n) })
+-    await repo.saveCheck(precise)
+-    const checks = await repo.listChecks()
+-    expect(checks.map((check: any) => check.id)).toEqual(["check_1", "check_infinite", "check_legacy", "check_precise"])
+-    expect(Equal.equals(checks.at(-1).duration, precise.duration)).toBe(true)
+-    const targets = await repo.listTargets()
+-    const infiniteRead = targets.find((target: any) => target.id === "target_infinite")
+-    const legacyRead = targets.find((target: any) => target.id === "target_legacy")
+-    expect([infiniteRead.interval, infiniteRead.timeout, infiniteRead.slowThreshold].every((value: unknown) => value === Duration.infinity)).toBe(true)
+-    expect([legacyRead.interval, legacyRead.timeout, legacyRead.slowThreshold].map(Duration.toMillis)).toEqual([4, 5, 6])
+-  } finally { await repo.close() }
+-
+-  const config = appConfig({ pollInterval: 1, probeTimeout: 1, workerConcurrency: 1, slowThreshold: 1, telemetryEnabled: false, maxIncidents: 0 })
+-  expect([config.telemetryEnabled, config.maxIncidents]).toEqual([false, 0])
+-})
++  it("decodes storage into domain and round-trips the encoded shape", async () => {
++    const domain = await Effect.runPromise(decodeStoredCheck(valid));
++    expect(domain.checkedAt).toBeInstanceOf(Date);
++    const row = await Effect.runPromise(Schema.decodeUnknownEffect(StoredCheck)(valid));
++    expect(await Effect.runPromise(Schema.encodeEffect(StoredCheck)(row))).toEqual(valid);
++  });
++  it("requires response and rejects non-positive durations", async () => {
++    const { response: _absent, ...withoutResponse } = valid;
++    await expect(Effect.runPromise(Schema.decodeUnknownEffect(StoredCheck)(withoutResponse))).rejects.toThrow("response");
++    await expect(Effect.runPromise(decodeStoredCheck({ ...valid, durationMillis: 0 }))).rejects.toThrow("durationMillis");
++  });
++  it("reports a stable field path and derives JSON Schema", async () => {
++    await expect(Effect.runPromise(decodeStoredCheck({ ...valid, targetId: 4 }))).rejects.toThrow("targetId");
++    expect(JSON.stringify(storedCheckJsonSchema)).toContain("durationMillis");
++  });
++  it("derives target validation and keeps wire and domain representations distinct", async () => {
++    const encoded = { id: "target_api", name: " API ", url: "https://example.test", method: "GET", expectedStatus: [200], interval: "1 second", timeout: "2 seconds", slowThreshold: "3 seconds" } as const;
++    const domain = await Effect.runPromise(decodeTargetConfig(encoded));
++    expect([domain.name, Duration.toMillis(domain.interval), Duration.toMillis(domain.timeout), Duration.toMillis(domain.slowThreshold)]).toEqual(["API", 1000, 2000, 3000]);
++    const roundTrip = await Effect.runPromise(Schema.encodeEffect(TargetConfig)(domain));
++    expect(roundTrip.name).toBe("API");
++    expect([roundTrip.interval, roundTrip.timeout, roundTrip.slowThreshold]).toEqual([1000, 2000, 3000]);
++    const decodedAgain = await Effect.runPromise(decodeTargetConfig(JSON.parse(JSON.stringify(roundTrip))));
++    expect([decodedAgain.interval, decodedAgain.timeout, decodedAgain.slowThreshold].every(Duration.isDuration)).toBe(true);
++    expect(JSON.stringify(targetJsonSchemaDocument)).toContain("slowThreshold");
++    expect(() => new TargetConfig(encoded as any)).toThrow();
++  });
++  it("enforces positive constructed durations without excluding sub-millisecond values", () => {
++    const canonical = { id: targetId("target_api"), name: "API", url: "https://example.test", method: "GET", expectedStatus: [200], interval: Duration.nanos(500_000n), timeout: Duration.nanos(500_000n), slowThreshold: Duration.nanos(500_000n), enabled: true } as const;
++    expect(() => new Target(canonical)).not.toThrow();
++    for (const field of ["interval", "timeout", "slowThreshold"] as const) {
++      expect(() => new Target({ ...canonical, [field]: Duration.zero }), field).toThrow();
++      expect(() => new Target({ ...canonical, [field]: Duration.millis(-1) }), field).toThrow();
++    }
++    expect(() => new Target({ ...canonical, interval: Duration.infinity, timeout: Duration.infinity, slowThreshold: Duration.infinity })).not.toThrow();
++  });
++  it("writes canonical rows, accepts exact duplicates, and reads pre-schema rows", async () => {
++    const repo = new SqliteCheckRepository();
++    try {
++      const domain = await Effect.runPromise(decodeStoredCheck(valid));
++      await repo.saveCheck(domain);
++      await repo.saveCheck(domain);
++      const infiniteCheck = new CheckResult({ ...domain, id: "check_infinite", duration: Duration.infinity });
++      await repo.saveCheck(infiniteCheck);
++      await repo.saveCheck(infiniteCheck);
++      await repo.saveTarget(new Target({ id: targetId("target_infinite"), name: "Infinite", url: "https://example.test", method: "GET", expectedStatus: [200], interval: Duration.infinity, timeout: Duration.infinity, slowThreshold: Duration.infinity, enabled: true }));
++      const legacyTarget = { id: "target_legacy", name: "Legacy", url: "https://legacy.example.test", method: "GET", expectedStatus: [200], interval: 4, timeout: 5, slowThreshold: 6, enabled: true };
++      await repo.execute(`insert into targets(id,json) values('target_legacy','${JSON.stringify(legacyTarget).replaceAll("'", "''")}')`);
++      const legacy = JSON.stringify({ ...valid, id: "check_legacy", duration: 7, durationMillis: undefined });
++      await repo.execute(`insert into checks(id,json) values('check_legacy','${legacy.replaceAll("'", "''")}')`);
++      const precise = new CheckResult({ ...domain, id: "check_precise", duration: Duration.nanos(9_007_199_254_740_993n) });
++      await repo.saveCheck(precise);
++      const checks = await repo.listChecks();
++      expect(checks.map((check) => check.id)).toEqual(["check_1", "check_infinite", "check_legacy", "check_precise"]);
++      expect(checks.slice(0, 3).map((check) => Duration.toMillis(check.duration))).toEqual([12, Infinity, 7]);
++      expect(Equal.equals(checks.at(-1)!.duration, precise.duration)).toBe(true);
++      const targets = await repo.listTargets();
++      const infinite = targets.find((target) => target.id === "target_infinite")!;
++      const legacyTargetRead = targets.find((target) => target.id === "target_legacy")!;
++      expect([infinite.interval, infinite.timeout, infinite.slowThreshold].every((value) => value === Duration.infinity)).toBe(true);
++      expect([legacyTargetRead.interval, legacyTargetRead.timeout, legacyTargetRead.slowThreshold].map(Duration.toMillis)).toEqual([4, 5, 6]);
++    } finally { await repo.close(); }
++  });
++  it("preserves explicit false and zero configuration values", () => {
++    const config = appConfig({ pollInterval: 1, probeTimeout: 1, workerConcurrency: 1, slowThreshold: 1, telemetryEnabled: false, maxIncidents: 0 });
++    expect(config.telemetryEnabled).toBe(false);
++    expect(config.maxIncidents).toBe(0);
++  });
++});
+diff --git a/test/checkpoint-16/atomic-boundaries.test.ts b/test/checkpoint-16/atomic-boundaries.test.ts
+new file mode 100644
+index 0000000..3f5abc2
+--- /dev/null
++++ b/test/checkpoint-16/atomic-boundaries.test.ts
+@@ -0,0 +1,254 @@
++import { expect, it } from "vitest"
++import { Cause, Duration, Effect, Equal, Fiber, TxRef } from "effect"
++import { RepositoryError } from "../../src/domain/errors.js"
++import { CheckFailure, CheckResult, Down, Incident, ResponseMetadata, Target, Up, targetId } from "../../src/domain/schema.js"
++import { startServer } from "../../src/http/server.js"
++import { SqliteCheckRepository } from "../../src/repo/SqliteCheckRepository.js"
++import { HistoryPlatformLive, decodeHistoryLine, importHistory } from "../../src/services/DigestService.js"
++import * as StatusBoard from "../../src/stm/StatusBoard.js"
++import { runOnceEffect } from "../../src/watch/Scheduler.js"
++import { StatusState } from "../../src/watch/StatusState.js"
++import { mkdtemp, rm, writeFile } from "node:fs/promises"
++import { tmpdir } from "node:os"
++import { join } from "node:path"
++
++const tables = ["checks", "incidents", "incident_events", "delivery_outbox"] as const
++const execute = (repo: any, statement: string) => typeof repo.execute === "function" ? repo.execute(statement) : Promise.resolve(repo.db.exec(statement))
++const countRows = (repo: any, table: typeof tables[number]) => typeof repo.countRows === "function"
++  ? repo.countRows(table)
++  : Promise.resolve(Number(repo.db.prepare(`select count(*) as count from ${table}`).get().count))
++const runMaybe = <A>(value: A | Promise<A> | Effect.Effect<A>) => Effect.isEffect(value) ? Effect.runPromise(value) : Promise.resolve(value)
++const makeStatusBoard: any = StatusBoard.make
++const makeBoard = () => runMaybe(typeof makeStatusBoard === "function" ? makeStatusBoard() : makeStatusBoard)
++const check = new CheckResult({ id: "check_tx", targetId: targetId("target_tx"), checkedAt: new Date(0), duration: "1 ms", classification: new Down(), failure: new CheckFailure({ reason: "down" }), response: new ResponseMetadata({ status: 500 }) })
++const upCheck = () => new CheckResult({ id: check.id, targetId: check.targetId, checkedAt: check.checkedAt, duration: check.duration, classification: new Up(), response: check.response })
++const historyRow = (overrides: Record<string, unknown> = {}) => JSON.stringify({ id: "check_history", targetId: "target_history", checkedAt: "2026-01-01T12:34:56.123+05:30", durationMillis: 0.000001, classification: { _tag: "Up" }, response: {}, ...overrides })
++
++it("validates history and HTTP boundaries, then rolls related SQL writes back", async () => {
++  for (const row of [
++    historyRow({ checkedAt: "2026-01-01" }),
++    historyRow({ checkedAt: "2026-02-30T00:00:00Z" }),
++    historyRow({ durationMillis: 0.0000009 }),
++    JSON.stringify({ ...JSON.parse(historyRow()), duration: 7, response: undefined }),
++  ]) await expect(decodeHistoryLine(row, 1)).rejects.toMatchObject({ _tag: "MalformedHistoryRow" })
++  await expect(decodeHistoryLine(historyRow(), 1)).resolves.toMatchObject({ id: "check_history" })
++  const decodedHistory = await decodeHistoryLine(historyRow({ duration: 7 }), 1)
++  expect(Duration.toMillis(decodedHistory.duration)).toBe(0.000001)
++
++  const directory = await mkdtemp(join(tmpdir(), "beaconwatch-history-"))
++  const path = join(directory, "history.ndjson")
++  try {
++    await writeFile(path, [historyRow(), historyRow({ checkedAt: "2026-01-01" }), historyRow({ checkedAt: "2026-02-30T00:00:00Z" }), historyRow({ durationMillis: 0.0000009 })].join("\n"))
++    const digest = await Effect.runPromise(importHistory(path).pipe(Effect.provide(HistoryPlatformLive)))
++    expect([digest.processedRows, digest.malformedRows, digest.targets[0]?.checks]).toEqual([1, 3, 1])
++
++    const preciseLine = (durationMillis: number) => historyRow({ id: "check_precision_conflict", durationMillis })
++    await writeFile(path, `${preciseLine(4_503_599_627.370497)}\n${preciseLine(4_503_599_627.370498)}\n`)
++    const preciseDigest = await Effect.runPromise(importHistory(path).pipe(Effect.provide(HistoryPlatformLive)))
++    expect(preciseDigest).toEqual({ targets: [], incidents: [], malformedRows: 1, processedRows: 2 })
++  } finally { await rm(directory, { recursive: true, force: true }) }
++
++  let calls = 0
++  const { server, baseUrl } = await startServer({
++    listTargets: async () => [],
++    listChecks: async () => [],
++    getIncident: async () => { calls++; return undefined },
++  } as never)
++  try {
++    expect((await fetch(`${baseUrl}/incidents/not-valid`)).status).toBe(400)
++    expect(calls).toBe(0)
++    const document = await (await fetch(`${baseUrl}/openapi.json`)).json() as any
++    const operation = document.paths?.["/incidents/{id}"]?.get
++    expect(operation?.parameters?.some((parameter: any) => parameter.name === "id" && parameter.in === "path")).toBe(true)
++    expect(operation?.responses?.["200"]?.content?.["application/json"]?.schema).toBeTruthy()
++    expect(operation?.responses?.["500"]?.content?.["application/json"]?.schema).toBeTruthy()
++  } finally {
++    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
++  }
++
++  const failed = await startServer({
++    listTargets: async () => { throw new Error("driver leaked") },
++    listChecks: async () => [],
++    getIncident: async () => undefined,
++  } as never)
++  try {
++    const response = await fetch(`${failed.baseUrl}/targets`)
++    expect(response.status).toBe(500)
++    expect(await response.json()).toEqual({ message: "failed to list targets" })
++  } finally {
++    await new Promise<void>((resolve, reject) => failed.server.close(error => error ? reject(error) : resolve()))
++  }
++
++  const observations: number[][] = []
++  for (const failedTable of ["incidents", "incident_events", "delivery_outbox"] as const) {
++    const repo = new SqliteCheckRepository()
++    try {
++      await execute(repo, `create trigger fail_${failedTable} before insert on ${failedTable} begin select raise(abort, 'forced'); end`)
++      await expect(repo.applyCheck(check)).rejects.toBeTruthy()
++      observations.push(await Promise.all(tables.map(table => countRows(repo, table))))
++    } finally { await repo.close() }
++  }
++  expect(observations).toEqual([[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]])
++
++  const closed = new SqliteCheckRepository()
++  await closed.close()
++  const infrastructure = await closed.listChecks().catch(error => error)
++  expect(infrastructure).toBeInstanceOf(RepositoryError)
++  expect(infrastructure.operation).toBe("listChecks")
++  expect(infrastructure.cause).toBeTruthy()
++
++  const runner = new SqliteCheckRepository()
++  try {
++    const expectedFailure = new RepositoryError({ operation: "test", cause: "expected" })
++    await expect((runner as any).run("test", Effect.fail(expectedFailure))).rejects.toBe(expectedFailure)
++    const sentinel = { defect: "driver invariant" }
++    await expect((runner as any).run("test", Effect.die(sentinel))).rejects.toBe(sentinel)
++  } finally { await runner.close() }
++
++  const offsetRepo = new SqliteCheckRepository()
++  try {
++    const down = new CheckResult({ ...check, id: "check_offset_down", checkedAt: new Date("2025-12-31T23:00:00Z") })
++    await offsetRepo.applyCheck(down)
++    await execute(offsetRepo, "update checks set json=json_set(json,'$.checkedAt','2026-01-01T00:00:00+01:00') where id='check_offset_down'")
++    const up = new CheckResult({ id: "check_offset_up", targetId: check.targetId, checkedAt: new Date("2025-12-31T23:30:00Z"), duration: check.duration, classification: new Up(), response: check.response })
++    await expect(offsetRepo.applyCheck(up)).resolves.toBe("Closed")
++    expect((await offsetRepo.listChecks()).map(value => value.id)).toEqual(["check_offset_down", "check_offset_up"])
++
++    const older = new Incident({ id: "incident_offset_a", targetId: check.targetId, openedAt: new Date("2025-12-31T23:00:00Z"), status: "Open", reason: "older", latestCheckId: down.id })
++    const newer = new Incident({ id: "incident_offset_b", targetId: check.targetId, openedAt: new Date("2025-12-31T23:30:00Z"), status: "Open", reason: "newer", latestCheckId: down.id })
++    await offsetRepo.saveIncident(older)
++    await offsetRepo.saveIncident(newer)
++    await execute(offsetRepo, "update incidents set json=json_set(json,'$.openedAt','2026-01-01T00:00:00+01:00') where id='incident_offset_a'")
++    expect((await offsetRepo.getOpenIncident(check.targetId))?.id).toBe(newer.id)
++    const latestDown = new CheckResult({ ...down, id: "check_offset_latest", checkedAt: new Date("2026-01-01T00:00:00Z") })
++    await expect(offsetRepo.applyCheck(latestDown)).resolves.toBe("Updated")
++    expect((await offsetRepo.getIncident(newer.id))?.latestCheckId).toBe(latestDown.id)
++
++    const tieTarget = targetId("target_offset_tie")
++    await offsetRepo.saveIncident(new Incident({ id: "incident_tie_a", targetId: tieTarget, openedAt: new Date("2025-12-31T23:00:00Z"), status: "Open", reason: "a", latestCheckId: down.id }))
++    await offsetRepo.saveIncident(new Incident({ id: "incident_tie_b", targetId: tieTarget, openedAt: new Date("2025-12-31T23:00:00Z"), status: "Open", reason: "b", latestCheckId: down.id }))
++    await execute(offsetRepo, "update incidents set json=json_set(json,'$.openedAt','2026-01-01T00:00:00+01:00') where id='incident_tie_b'")
++    expect((await offsetRepo.getOpenIncident(tieTarget))?.id).toBe("incident_tie_b")
++  } finally { await offsetRepo.close() }
++
++  const target = new Target({ id: targetId("target_repository"), name: "Repository", url: "https://example.test", method: "GET", expectedStatus: [200], interval: Duration.seconds(1), timeout: Duration.seconds(1), slowThreshold: Duration.seconds(1), enabled: true })
++  const client = { probe: async () => ({ status: 200 }) }
++  const status = new StatusState()
++  const run = (cause: unknown) => runOnceEffect([target], { queueCapacity: 1, workerCount: 1 }, {
++    client,
++    repository: { applyCheckWithIncident: async () => { throw cause } } as any,
++    status,
++  })
++
++  const expected = new RepositoryError({ operation: "applyCheckWithIncident", cause: new Error("closed") })
++  const expectedExit = await Effect.runPromise(Effect.exit(run(expected)))
++  expect(expectedExit._tag).toBe("Failure")
++  if (expectedExit._tag === "Failure") {
++    expect(Cause.hasFails(expectedExit.cause)).toBe(true)
++    expect(Cause.hasDies(expectedExit.cause)).toBe(false)
++    expect(expectedExit.cause.reasons.some((reason) => Cause.isFailReason(reason) && reason.error === expected)).toBe(true)
++  }
++
++  const unexpected = new Error("driver contract violated")
++  const unexpectedExit = await Effect.runPromise(Effect.exit(run(unexpected)))
++  expect(unexpectedExit._tag).toBe("Failure")
++  if (unexpectedExit._tag === "Failure") {
++    expect(Cause.hasFails(unexpectedExit.cause)).toBe(false)
++    expect(Cause.hasDies(unexpectedExit.cause)).toBe(true)
++    expect(unexpectedExit.cause.reasons.some((reason) => Cause.isDieReason(reason) && reason.defect === unexpected)).toBe(true)
++  }
++})
++
++it("serializes concurrent identical and conflicting check saves", async () => {
++  const infinite = new SqliteCheckRepository()
++  try {
++    const infiniteCheck = new CheckResult({ ...check, id: "check_infinite", duration: Duration.infinity })
++    await expect(infinite.applyCheck(infiniteCheck)).resolves.toBe("Opened")
++    await expect(infinite.applyCheck(infiniteCheck)).resolves.toBe("Unchanged")
++    expect((await infinite.listChecks()).every(value => value.duration === Duration.infinity)).toBe(true)
++
++    const precise = new CheckResult({ ...check, id: "check_precise", duration: Duration.nanos(9_007_199_254_740_993n) })
++    await infinite.saveCheck(precise)
++    const preciseRead = (await infinite.listChecks()).find(value => value.id === precise.id)!
++    expect(Equal.equals(preciseRead.duration, precise.duration)).toBe(true)
++    const adjacent = new CheckResult({ ...precise, duration: Duration.nanos(9_007_199_254_740_992n) })
++    await expect(infinite.saveCheck(adjacent)).rejects.toMatchObject({ operation: "saveCheck" })
++  } finally { await infinite.close() }
++
++  const identical = new SqliteCheckRepository()
++  try {
++    await Promise.all([identical.saveCheck(check), identical.saveCheck(check)])
++    expect((await identical.listChecks()).map(value => value.id)).toEqual([check.id])
++  } finally { await identical.close() }
++
++  const conflicting = new SqliteCheckRepository()
++  try {
++    const up = upCheck()
++    const results = await Promise.allSettled([conflicting.saveCheck(check), conflicting.saveCheck(up)])
++    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1)
++    expect(results.filter(result => result.status === "rejected")).toHaveLength(1)
++    const saved = await conflicting.listChecks()
++    expect(saved).toHaveLength(1)
++    expect(["Down", "Up"]).toContain(saved[0]?.classification._tag)
++  } finally { await conflicting.close() }
++})
++
++it("delivers only after commit and keeps related status counters atomic", async () => {
++  let preCommitSends = 0
++  const repo = new (SqliteCheckRepository as any)(":memory:", () => {
++    preCommitSends++
++  })
++  try {
++    await repo.applyCheck(check)
++    expect(preCommitSends).toBe(0)
++    const deliveryIds: number[] = []
++    await expect(repo.deliverPending((id: number) => { deliveryIds.push(id); throw new Error("delivery interrupted") })).rejects.toBeTruthy()
++    await repo.deliverPending((id: number) => { deliveryIds.push(id) })
++    await repo.deliverPending((id: number) => { deliveryIds.push(id) })
++    expect(deliveryIds).toHaveLength(2)
++    expect(deliveryIds[1]).toBe(deliveryIds[0])
++  } finally { await repo.close() }
++
++  for (const method of ["applyCheck", "applyCheckWithIncident"] as const) {
++    const conflicting = new SqliteCheckRepository()
++    try {
++      await conflicting[method](check)
++      const error = await conflicting[method](upCheck()).catch(cause => cause)
++      expect(error).toBeInstanceOf(RepositoryError)
++      expect(error.operation).toBe("saveCheck")
++      expect(String(error.cause)).toContain(check.id)
++    } finally { await conflicting.close() }
++  }
++
++  const board: any = await makeBoard()
++  await Promise.all(Array.from({ length: 16 }, () => runMaybe(board.openIncident(check.targetId, "api"))))
++  const snapshot = await runMaybe(typeof board.snapshot === "function" ? board.snapshot() : board.snapshot)
++  expect(snapshot.globalDegradedCount).toBe(1)
++  expect(snapshot.tagDegradedCounts.get("api")).toBe(1)
++
++  let external = 0
++  await runMaybe(StatusBoard.retriedUpdate(board, check.targetId, "ops", () => { external++ }))
++  expect(external).toBe(1)
++  const transferred = await runMaybe(typeof board.snapshot === "function" ? board.snapshot() : board.snapshot)
++  expect(transferred.globalDegradedCount).toBe(1)
++  expect(transferred.tagDegradedCounts.get("api") ?? 0).toBe(0)
++  expect(transferred.tagDegradedCounts.get("ops")).toBe(1)
++
++  const interrupted: any = await makeBoard()
++  if (typeof interrupted.openIncidentWhen === "function") {
++    await Effect.runPromise(Effect.gen(function*() {
++      const gate = yield* TxRef.make(false).pipe(Effect.tx)
++      const transaction = interrupted.openIncidentWhen(check.targetId, "api", gate, Effect.void) as Effect.Effect<void, never, never>
++      const update = yield* Effect.forkChild(transaction)
++      yield* Effect.yieldNow
++      yield* Fiber.interrupt(update)
++    }))
++  } else {
++    const controller = new AbortController()
++    controller.abort(new Error("cancel before commit"))
++    await runMaybe((StatusBoard as any).snapshotDuringAbort(interrupted, check.targetId, "api", controller.signal)).catch(() => undefined)
++  }
++  const afterInterrupt = await runMaybe(typeof interrupted.snapshot === "function" ? interrupted.snapshot() : interrupted.snapshot)
++  expect(afterInterrupt.globalDegradedCount).toBe(0)
++  expect([...afterInterrupt.tagDegradedCounts.values()].reduce((a: number, b: number) => a + b, 0)).toBe(0)
++})

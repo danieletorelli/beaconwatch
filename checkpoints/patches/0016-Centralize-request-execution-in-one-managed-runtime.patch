@@ -1,0 +1,536 @@
+diff --git a/package.json b/package.json
+index 4e2c74c..2aea0f5 100644
+--- a/package.json
++++ b/package.json
+@@ -25,6 +25,7 @@
+     ,"checkpoint:12": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/checkpoint-07 test/checkpoint-08 test/checkpoint-09 test/checkpoint-10 test/checkpoint-11 test/checkpoint-12 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
+     ,"checkpoint:13": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/checkpoint-07 test/checkpoint-08 test/checkpoint-09 test/checkpoint-10 test/checkpoint-11 test/checkpoint-12 test/checkpoint-13 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
+     ,"checkpoint:14": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/checkpoint-07 test/checkpoint-08 test/checkpoint-09 test/checkpoint-10 test/checkpoint-11 test/checkpoint-12 test/checkpoint-13 test/checkpoint-14 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
++    ,"checkpoint:15": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/checkpoint-07 test/checkpoint-08 test/checkpoint-09 test/checkpoint-10 test/checkpoint-11 test/checkpoint-12 test/checkpoint-13 test/checkpoint-14 test/checkpoint-15 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
+   },
+   "dependencies": {
+     "@effect/platform-node": "4.0.0-rc.112",
+diff --git a/src/bin.ts b/src/bin.ts
+index e86912f..d9ff338 100644
+--- a/src/bin.ts
++++ b/src/bin.ts
+@@ -1,7 +1,3 @@
++import { NodeRuntime } from "@effect/platform-node";
+ import { main } from "./main.js";
+-main()
+-  .then(console.log)
+-  .catch((e) => {
+-    console.error(e);
+-    process.exitCode = 1;
+-  });
++NodeRuntime.runMain(main());
+diff --git a/src/cli/cli.ts b/src/cli/cli.ts
+index 0b01a4a..3b6602b 100644
+--- a/src/cli/cli.ts
++++ b/src/cli/cli.ts
+@@ -1,14 +1,24 @@
+-import { Effect } from "effect";
+-import { HistoryPlatformLive, importHistory } from "../services/DigestService.js";
++import { Effect, Schema } from "effect"
++import { Argument, Command } from "effect/unstable/cli"
++import { importHistory } from "../services/DigestService.js"
+
+-export async function runCli(argv: readonly string[]) {
+-  const [command, arg] = argv;
+-  if (command === undefined) return "beaconwatch";
+-  if (command === "demo") return "demo";
+-  if (command === "check" && arg) return `checked ${arg}`;
+-  if (command === "serve") return "serve";
+-  if (command === "import-history" && arg)
+-    return Effect.runPromise(importHistory(arg).pipe(Effect.provide(HistoryPlatformLive)));
+-  if (command === "digest") return "digest";
+-  throw new TypeError("usage: beaconwatch [demo|check <config>|serve|import-history <file>|digest]");
++const PathArg = Argument.string("file").pipe(Argument.withSchema(Schema.String.check(Schema.isMinLength(1))))
++const ConfigArg = Argument.string("config").pipe(Argument.withSchema(Schema.String.check(Schema.isMinLength(1))))
++
++export const commandHandlers = {
++  demo: Effect.succeed("demo"),
++  check: (config: string) => Effect.succeed(`checked ${config}`),
++  serve: Effect.succeed("serve"),
++  importHistory: (file: string) => importHistory(file),
++  digest: Effect.succeed("digest")
+ }
++
++export const cli = Command.make("beaconwatch", {}, () => Effect.succeed("beaconwatch")).pipe(
++  Command.withSubcommands([
++    Command.make("demo", {}, () => commandHandlers.demo),
++    Command.make("check", { config: ConfigArg }, ({ config }) => commandHandlers.check(config)),
++    Command.make("serve", {}, () => commandHandlers.serve),
++    Command.make("import-history", { file: PathArg }, ({ file }) => commandHandlers.importHistory(file)),
++    Command.make("digest", {}, () => commandHandlers.digest)
++  ])
++)
+diff --git a/src/main.ts b/src/main.ts
+index 0796aff..d1d4173 100644
+--- a/src/main.ts
++++ b/src/main.ts
+@@ -1,10 +1,19 @@
+-import { runCli } from "./cli/cli.js";
+-import { Effect } from "effect";
+-export const repositoryChoice = (env: Record<string, string | undefined>) =>
+-  env.BEACONWATCH_REPOSITORY === "sqlite"
+-    ? ("sqlite" as const)
+-    : ("memory" as const);
+-export const main = (argv = process.argv.slice(2)) => runCli(argv);
++import { Effect, Layer } from "effect";
++import { NodeServices } from "@effect/platform-node";
++import { Command } from "effect/unstable/cli";
++import { cli } from "./cli/cli.js";
++import { HistoryPlatformLive } from "./services/DigestService.js";
++import { AppLayer } from "./runtime/ManagedRuntime.js";
++
++export type RepositoryChoice = "memory" | "sqlite";
++export const repositoryChoice = (env: Record<string, string | undefined>): RepositoryChoice =>
++  env.BEACONWATCH_REPOSITORY === "sqlite" ? "sqlite" : "memory";
++export const buildAppLayer = (choice: RepositoryChoice) => Layer.mergeAll(AppLayer(choice), HistoryPlatformLive, NodeServices.layer);
++export const main = (env: Record<string, string | undefined> = process.env, argv: readonly string[] = process.argv.slice(2)) =>
++  Command.runWith(cli, { version: "0.1.0" })(argv).pipe(
++    Effect.provide(buildAppLayer(repositoryChoice(env))),
++    Effect.scoped,
++  );
+ export const startupEffect = (load: () => Promise<void>) =>
+   Effect.tryPromise({ try: load, catch: (cause) => cause });
+ export const eagerStartup = (load: () => Promise<void>) => {
+diff --git a/src/runtime/ManagedRuntime.ts b/src/runtime/ManagedRuntime.ts
+index db9a7b3..182337f 100644
+--- a/src/runtime/ManagedRuntime.ts
++++ b/src/runtime/ManagedRuntime.ts
+@@ -1,53 +1,81 @@
+-import { InMemoryCheckRepository } from "../repo/CheckRepository.js";
++import { Context, Effect, Layer, ManagedRuntime } from "effect";
++import { InMemoryCheckRepository, type CheckRepositoryShape } from "../repo/CheckRepository.js";
++import { SqliteCheckRepository, tempLayer } from "../repo/SqliteCheckRepository.js";
+ import { IncidentService } from "../services/IncidentService.js";
+ import { Fake } from "../services/IncidentSummarizer.js";
+-import { Effect, Exit, Scope } from "effect";
++
++export class AppServices extends Context.Service<AppServices, ManagedAppRuntime>()("beaconwatch/AppServices") {}
++
+ export class ManagedAppRuntime {
+   static acquired = 0;
+   static released = 0;
+-  readonly repository = new InMemoryCheckRepository();
+-  readonly incidents = new IncidentService(this.repository);
++  readonly repository: CheckRepositoryShape;
++  readonly incidents: IncidentService;
+   readonly summarizer = Fake();
+   private disposed = false;
+-  readonly scope = Scope.makeUnsafe();
+-  constructor() { ManagedAppRuntime.acquired++; }
+-  async runPromise<A>(work: (services: this) => Promise<A>) {
+-    if (this.disposed) throw new Error("runtime disposed");
+-    return work(this);
++  private disposal: Promise<void> | undefined;
++  private readonly managed = ManagedRuntime.make(Layer.succeed(AppServices)(this));
++
++  constructor(repository: CheckRepositoryShape = new InMemoryCheckRepository()) {
++    this.repository = repository;
++    this.incidents = new IncidentService(repository);
++    ManagedAppRuntime.acquired++;
+   }
+-  async dispose() {
+-    if (!this.disposed) {
+-      await Effect.runPromise(Scope.close(this.scope, Exit.void));
+-      ManagedAppRuntime.released++;
+-    }
++
++  runPromise<A>(work: (services: this, signal: AbortSignal) => Promise<A>, signal?: AbortSignal) {
++    if (this.disposed) return Promise.reject(new Error("runtime disposed"));
++    const self = this;
++    const effect = Effect.gen(function*() {
++      const services = yield* AppServices;
++      return yield* Effect.callback<A, unknown>((resume, childSignal) => {
++        const running = work(services as typeof self, childSignal);
++        running.then(
++          (value) => resume(Effect.succeed(value)),
++          (cause) => resume(Effect.fail(cause)),
++        );
++        return Effect.promise(() => running.then(() => undefined, () => undefined));
++      });
++    });
++    return this.managed.runPromise(effect, signal ? { signal } : undefined);
++  }
++
++  dispose() {
++    if (this.disposal) return this.disposal;
+     this.disposed = true;
++    this.disposal = (async () => {
++      await this.managed.dispose();
++      ManagedAppRuntime.released++;
++    })();
++    return this.disposal;
+   }
+ }
++
+ export const runtime = new ManagedAppRuntime();
+ export const closeScope = () => runtime.dispose();
+ export const runtimeForRequest = () => runtime;
+-export const runRequestChild = async <A>(
+-  runtime: ManagedAppRuntime,
++
++export const runRequestChild = <A>(
++  app: ManagedAppRuntime,
+   work: (services: ManagedAppRuntime, signal: AbortSignal) => Promise<A>,
+   signal: AbortSignal,
+-) => {
+-  const child = new AbortController();
+-  const running = runtime.runPromise((services) => work(services, child.signal));
+-  const cancelled = new Promise<never>((_, reject) => {
+-    signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+-  });
+-  return Promise.race([running, cancelled]);
+-};
++) => app.runPromise(work, signal);
++
+ export class RequestRuntimeHost {
+   private readonly app = runtime;
+-  async handle<A>(work: (s: ManagedAppRuntime, signal: AbortSignal) => Promise<A>, signal = new AbortController().signal) {
++  handle<A>(work: (services: ManagedAppRuntime, signal: AbortSignal) => Promise<A>, signal = new AbortController().signal) {
+     return runRequestChild(this.app, work, signal);
+   }
+-  async shutdown() {
+-    // Framework shutdown wiring remains outside this resource scope.
+-  }
++  shutdown() { return this.app.dispose(); }
+ }
+-export const runPromise = <A>(work: (s: ManagedAppRuntime) => Promise<A>) =>
+-  runtime.runPromise(work);
++
++export const runPromise = <A>(work: (services: ManagedAppRuntime) => Promise<A>) => runtime.runPromise(work);
+ export const dispose = () => runtime.dispose();
+-export const AppLayer = runtime;
++export const AppLayer = (choice: "memory" | "sqlite") => Layer.effect(AppServices)(
++  Effect.acquireRelease(
++    Effect.sync(() => new ManagedAppRuntime(choice === "sqlite" ? tempLayer() : new InMemoryCheckRepository())),
++    (app) => Effect.promise(async () => {
++      await app.dispose();
++      if (app.repository instanceof SqliteCheckRepository) await app.repository.close();
++    }),
++  ),
++);
+diff --git a/src/services/ProbeClient.ts b/src/services/ProbeClient.ts
+index db9beb7..5d5c23e 100644
+--- a/src/services/ProbeClient.ts
++++ b/src/services/ProbeClient.ts
+@@ -1,4 +1,5 @@
+ import {
++  ConfigError,
+   DnsError,
+   InvalidBody,
+   TimeoutError,
+@@ -37,11 +38,8 @@ export const slow = (duration = 2000, status = 200): Step => ({
+   duration,
+   response: valid(status),
+ });
+-export const malformedBody = (status = 200): RawProbeResponse => ({
+-  status,
+-  body: "not-json",
+-  bytes: 8,
+-});
++export const malformedBody = (_status = 200): InvalidBody =>
++  new InvalidBody({ reason: "malformed response body" });
+ export const statusError = (status = 500): RawProbeResponse => ({
+   status,
+   body: { ok: false },
+@@ -59,6 +57,12 @@ export class FakeProbeClient implements ProbeClientShape {
+   private scripts: Map<string, Step[]>;
+   private counts = new Map<string, number>();
+   constructor(input: Record<string, Step | readonly Step[]>) {
++    for (const [key, value] of Object.entries(input)) {
++      const steps = Array.isArray(value) ? value : [value];
++      if (steps.length === 0) throw new ConfigError({ reason: `empty fake script: ${key}` });
++      if (steps.some((step) => !(step instanceof Error) && "_tag" in step && step._tag === "recover-after" && (!Number.isSafeInteger(step.failures) || step.failures < 0)))
++        throw new ConfigError({ reason: `invalid recover-after count: ${key}` });
++    }
+     this.scripts = new Map(
+       Object.entries(input).map(([k, v]) => [
+         k,
+@@ -66,6 +70,27 @@ export class FakeProbeClient implements ProbeClientShape {
+       ]),
+     );
+   }
++  get preferProbeEffect() {
++    return this.probe === FakeProbeClient.prototype.probe;
++  }
++  probeEffect(t: ProbeTarget) {
++    return Effect.suspend(() => {
++      const key = this.scripts.has(t.id) ? t.id : t.url;
++      const a = this.scripts.get(key) ?? [valid()];
++      const step = a[0] ?? valid();
++      if (a.length > 1) a.shift();
++      if (step instanceof Error) return Effect.fail(step as ProbeFailure);
++      if ("_tag" in step && step._tag === "delay") return Effect.sleep(`${step.duration} millis`).pipe(Effect.as(step.response));
++      if ("_tag" in step && step._tag === "recover-after") {
++        const n = (this.counts.get(key) ?? 0) + 1;
++        this.counts.set(key, n);
++        return n <= step.failures
++          ? Effect.fail(new DnsError({ host: new URL(t.url).host }))
++          : Effect.succeed(step.response);
++      }
++      return Effect.succeed(step);
++    });
++  }
+   async probe(t: ProbeTarget, signal?: AbortSignal) {
+     const key = this.scripts.has(t.id) ? t.id : t.url;
+     const a = this.scripts.get(key) ?? [valid()];
+@@ -73,7 +98,12 @@ export class FakeProbeClient implements ProbeClientShape {
+     if (a.length > 1) a.shift();
+     if (step instanceof Error) throw step;
+     if ("_tag" in step && step._tag === "delay") {
+-      await new Promise<void>((resolve) => setTimeout(resolve, step.duration));
++      await new Promise<void>((resolve, reject) => {
++        const timer = setTimeout(resolve, step.duration);
++        const abort = () => { clearTimeout(timer); reject(signal?.reason ?? new Error("probe aborted")); };
++        if (signal?.aborted) abort();
++        else signal?.addEventListener("abort", abort, { once: true });
++      });
+       return step.response;
+     }
+     if ("_tag" in step && step._tag === "recover-after") {
+diff --git a/src/watch/Scheduler.ts b/src/watch/Scheduler.ts
+index c57b552..8554e1a 100644
+--- a/src/watch/Scheduler.ts
++++ b/src/watch/Scheduler.ts
+@@ -5,6 +5,8 @@ import type { ProbeClientShape } from "../services/ProbeClient.js";
+ import type { CheckRepositoryShape } from "../repo/CheckRepository.js";
+ import type { StatusState } from "./StatusState.js";
+ import { Cause, Effect, PubSub, Queue, Schedule } from "effect";
++export const MAX_QUEUE_CAPACITY = 1_000_000;
++export const MAX_WORKER_COUNT = 1024;
+ export interface SchedulerOptions {
+   queueCapacity: number;
+   workerCount: number;
+@@ -15,12 +17,12 @@ export interface SchedulerServices {
+   status: StatusState;
+ }
+ const validate = (o: SchedulerOptions) => {
+-  if (!Number.isSafeInteger(o.queueCapacity) || o.queueCapacity <= 0)
++  if (!Number.isSafeInteger(o.queueCapacity) || o.queueCapacity <= 0 || o.queueCapacity > MAX_QUEUE_CAPACITY)
+     throw new ConfigError({
+-      reason: "queueCapacity must be a positive integer",
++      reason: `queueCapacity must be between 1 and ${MAX_QUEUE_CAPACITY}`,
+     });
+-  if (!Number.isSafeInteger(o.workerCount) || o.workerCount <= 0)
+-    throw new ConfigError({ reason: "workerCount must be a positive integer" });
++  if (!Number.isSafeInteger(o.workerCount) || o.workerCount <= 0 || o.workerCount > MAX_WORKER_COUNT)
++    throw new ConfigError({ reason: `workerCount must be between 1 and ${MAX_WORKER_COUNT}` });
+ };
+ const enabled = (t: Target | TargetConfig) => !("enabled" in t) || t.enabled;
+ const validateEffect = (options: SchedulerOptions) => Effect.try({
+diff --git a/test/checkpoint-15/runtime-ownership.test.ts b/test/checkpoint-15/runtime-ownership.test.ts
+new file mode 100644
+index 0000000..63587bb
+--- /dev/null
++++ b/test/checkpoint-15/runtime-ownership.test.ts
+@@ -0,0 +1,151 @@
++import { expect, it } from "vitest"
++import { it as effectIt } from "@effect/vitest"
++import { Cause, Duration, Effect, Fiber, Random } from "effect"
++import { TestClock } from "effect/testing"
++import { ConfigError } from "../../src/domain/errors.js"
++import { Target, targetId } from "../../src/domain/schema.js"
++import { probeOnce } from "../../src/probe/ProbeProgram.js"
++import { ManagedAppRuntime, RequestRuntimeHost, runRequestChild } from "../../src/runtime/ManagedRuntime.js"
++import { HttpProbeClient } from "../../src/services/HttpProbeClient.js"
++import { FakeProbeClient, malformedBody, recoverAfter, slow, transportError, valid } from "../../src/services/ProbeClient.js"
++import * as Scheduler from "../../src/watch/Scheduler.js"
++
++const target = new Target({ id: targetId("target_retry"), name: "Retry", url: "https://example.test", method: "GET", expectedStatus: [200], interval: Duration.millis(10), timeout: Duration.seconds(1), slowThreshold: Duration.millis(500), enabled: true })
++
++it("shares and disposes runtimes, propagates cancellation, and bounds allocation", async () => {
++  const { MAX_QUEUE_CAPACITY, MAX_WORKER_COUNT, runOnceEffect, watchLoopEffect } = Scheduler as any
++  expect(MAX_QUEUE_CAPACITY, "publish a hard queue allocation bound").toBeTypeOf("number")
++  expect(MAX_WORKER_COUNT, "publish a hard worker allocation bound").toBeTypeOf("number")
++  const beforeAcquired = ManagedAppRuntime.acquired, beforeReleased = ManagedAppRuntime.released
++  const host = new RequestRuntimeHost()
++  await Promise.all([host.handle(async () => 1), host.handle(async () => 2)])
++  await host.shutdown()
++  expect(ManagedAppRuntime.acquired - beforeAcquired).toBeLessThanOrEqual(1)
++  expect(ManagedAppRuntime.released - beforeReleased).toBe(1)
++
++  const app = new ManagedAppRuntime()
++  const controller = new AbortController()
++  const events: string[] = []
++  const client = new FakeProbeClient({ target_api: slow(30) })
++  let markStarted!: () => void
++  const started = new Promise<void>(resolve => { markStarted = resolve })
++  let markAborted!: () => void
++  const aborted = new Promise<void>(resolve => { markAborted = resolve })
++  let releaseCleanup!: () => void
++  const cleanupGate = new Promise<void>(resolve => { releaseCleanup = resolve })
++  const original = client.probe.bind(client)
++  client.probe = async (target, signal) => {
++    signal?.addEventListener("abort", () => { events.push("adapter-abort"); markAborted() }, { once: true })
++    markStarted()
++    try { const value = await original(target, signal); events.push("late-completion"); return value }
++    finally { await cleanupGate; events.push("adapter-finalized") }
++  }
++  const request = runRequestChild(app, (_services, signal) => client.probe({ id: "target_api", url: "https://example.test" } as never, signal), controller.signal)
++  let settled = false
++  void request.then(() => { settled = true }, () => { settled = true })
++  await started
++  controller.abort(new Error("stop"))
++  await aborted
++  expect(settled).toBe(false)
++  const beforeDispose = ManagedAppRuntime.released
++  let firstDisposeSettled = false, secondDisposeSettled = false
++  const firstDispose = app.dispose().then(() => { firstDisposeSettled = true })
++  const secondDispose = app.dispose().then(() => { secondDisposeSettled = true })
++  await Promise.resolve()
++  expect([firstDisposeSettled, secondDisposeSettled]).toEqual([false, false])
++  releaseCleanup()
++  await expect(request).rejects.toBeTruthy()
++  expect(events).toContain("adapter-abort")
++  expect(events).toContain("adapter-finalized")
++  expect(events).not.toContain("late-completion")
++  await Promise.all([firstDispose, secondDispose])
++  expect(ManagedAppRuntime.released).toBe(beforeDispose + 1)
++
++  let probes = 0
++  const services = {
++    client: { probe: async () => { probes++; return valid() } },
++    repository: {} as never,
++    status: {} as never,
++  }
++  const invalidPrograms = [
++    runOnceEffect([target], { queueCapacity: MAX_QUEUE_CAPACITY + 1, workerCount: 1 }, services),
++    watchLoopEffect([target], { queueCapacity: 1, workerCount: MAX_WORKER_COUNT + 1 }, services),
++  ]
++  expect(probes, "constructing scheduler Effects is lazy").toBe(0)
++  for (const program of invalidPrograms) {
++    const exit = await Effect.runPromise(Effect.exit(program))
++    expect(exit._tag).toBe("Failure")
++    if (exit._tag === "Failure") {
++      expect(Cause.hasFails(exit.cause)).toBe(true)
++      expect(Cause.hasDies(exit.cause)).toBe(false)
++      expect(exit.cause.reasons.some((reason) => Cause.isFailReason(reason) && reason.error instanceof ConfigError)).toBe(true)
++    }
++  }
++  expect(probes, "invalid configuration fails before work starts").toBe(0)
++  await expect(Effect.runPromise(runOnceEffect([], { queueCapacity: MAX_QUEUE_CAPACITY, workerCount: MAX_WORKER_COUNT }, services))).resolves.toBeUndefined()
++
++  expect(() => new FakeProbeClient({ empty: [] })).toThrow("empty fake script")
++  expect(() => new FakeProbeClient({ invalid: recoverAfter(-1) })).toThrow("invalid recover-after count")
++  const expectedMalformed = malformedBody()
++  const malformed = new FakeProbeClient({ target_api: expectedMalformed })
++  await expect(Effect.runPromise(malformed.probeEffect!({ id: "target_api", url: "https://example.test" } as never))).rejects.toBe(expectedMalformed)
++})
++
++effectIt.effect("runs lazy retry-aware scripts on the application clock", () => Effect.scoped(Effect.gen(function*() {
++  const client = new FakeProbeClient({ target_clock: slow(60_000) })
++  const fiber = yield* client.probeEffect!({ id: "target_clock", url: "https://example.test" } as never).pipe(Effect.forkScoped)
++  yield* TestClock.adjust("1 minute")
++  expect((yield* Fiber.join(fiber)).status).toBe(200)
++
++  const sequence = new FakeProbeClient({ target_retry: [transportError(), valid(201)] })
++  const first = sequence.probeEffect!(target)
++  const second = sequence.probeEffect!(target)
++  expect(yield* Effect.isFailure(first)).toBe(true)
++  expect((yield* second).status).toBe(201)
++
++  const recovering = new FakeProbeClient({ target_retry: recoverAfter(1) })
++  const retryFiber = yield* probeOnce(target, recovering).pipe(Random.withSeed("fake-retry"), Effect.forkScoped)
++  yield* TestClock.adjust("1 second")
++  expect((yield* Fiber.join(retryFiber)).classification._tag).toBe("Up")
++})))
++
++it("honors explicit Promise probe overrides on instances and subclasses", async () => {
++  const instance = new FakeProbeClient({ target_retry: transportError() })
++  instance.probe = async () => valid(202)
++  expect((await Effect.runPromise(probeOnce(target, instance))).response.status).toBe(202)
++
++  class PromiseProbeClient extends FakeProbeClient {
++    override async probe() { return valid(203) }
++  }
++  const subclass = new PromiseProbeClient({ target_retry: transportError() })
++  expect((await Effect.runPromise(probeOnce(target, subclass))).response.status).toBe(203)
++})
++
++effectIt.effect("awaits timed-out Promise cleanup before retrying", () => Effect.scoped(Effect.gen(function*() {
++  const timeoutTarget = new Target({ id: targetId("target_cleanup"), name: "Cleanup", url: "https://example.test", method: "GET", expectedStatus: [200], interval: Duration.millis(10), timeout: Duration.millis(5), slowThreshold: Duration.millis(500), enabled: true })
++  const cleanupClient = new HttpProbeClient()
++  let calls = 0
++  let markCleanupStarted!: () => void
++  const cleanupStarted = new Promise<void>(resolve => { markCleanupStarted = resolve })
++  let releaseCleanup!: () => void
++  const cleanupGate = new Promise<void>(resolve => { releaseCleanup = resolve })
++  cleanupClient.probe = (_target, signal) => {
++    calls++
++    if (calls > 1) return Promise.resolve(valid())
++    return new Promise((_resolve, reject) => signal!.addEventListener("abort", async () => {
++      markCleanupStarted()
++      await cleanupGate
++      reject(signal!.reason)
++    }, { once: true }))
++  }
++  const checked = yield* probeOnce(timeoutTarget, cleanupClient).pipe(Random.withSeed("cleanup-retry"), Effect.forkScoped)
++  yield* TestClock.adjust("1 second")
++  yield* Effect.promise(() => cleanupStarted)
++  yield* TestClock.adjust("1 second")
++  expect(calls, "do not retry before timed-out adapter cleanup settles").toBe(1)
++  releaseCleanup()
++  yield* Effect.promise(() => Promise.resolve())
++  yield* TestClock.adjust("1 second")
++  expect((yield* Fiber.join(checked)).response.status).toBe(200)
++  expect(calls).toBe(2)
++})))
+diff --git a/test/native-cli.test.ts b/test/native-cli.test.ts
+index e4373c2..7ccfacb 100644
+--- a/test/native-cli.test.ts
++++ b/test/native-cli.test.ts
+@@ -1,19 +1,41 @@
+ import { expect, it } from "vitest";
++import { Effect, Exit } from "effect";
++import { Command } from "effect/unstable/cli";
++import { NodeServices } from "@effect/platform-node";
++import { HistoryPlatformLive } from "../src/services/DigestService.js";
+ import { mkdtemp, writeFile } from "node:fs/promises";
+ import { join } from "node:path";
+ import { tmpdir } from "node:os";
+-import { runCli } from "../src/cli/cli.js";
++import { cli, commandHandlers } from "../src/cli/cli.js";
+
+ it("implements all six native command forms", async () => {
+   const directory = await mkdtemp(join(tmpdir(), "beaconwatch-cli-"));
+   const history = join(directory, "history.ndjson");
+   await writeFile(history, `${JSON.stringify({ id: "check_cli", targetId: "target_cli", checkedAt: "2026-01-01T00:00:00.000Z", durationMillis: 1, classification: { _tag: "Up" }, response: {} })}\n`);
+-  expect(await runCli([])).toBe("beaconwatch");
+-  expect(await runCli(["demo"])).toBe("demo");
+-  expect(await runCli(["check", "target.json"])).toBe("checked target.json");
+-  expect(await runCli(["serve"])).toBe("serve");
+-  expect(await runCli(["import-history", history])).toMatchObject({ processedRows: 1, malformedRows: 0 });
+-  expect(await runCli(["digest"])).toBe("digest");
+-  await expect(runCli(["check"])).rejects.toBeInstanceOf(TypeError);
+-  await expect(runCli(["import-history"])).rejects.toBeInstanceOf(TypeError);
++  expect(await Effect.runPromise(commandHandlers.demo)).toBe("demo");
++  expect(await Effect.runPromise(commandHandlers.check("target.json"))).toBe("checked target.json");
++  expect(await Effect.runPromise(commandHandlers.serve)).toBe("serve");
++  expect(await Effect.runPromise(commandHandlers.importHistory(history).pipe(Effect.provide(HistoryPlatformLive)))).toMatchObject({ processedRows: 1, malformedRows: 0 });
++  expect(await Effect.runPromise(commandHandlers.digest)).toBe("digest");
++
++  const run = (argv: readonly string[]) => Effect.runPromise(
++    Command.runWith(cli, { version: "0.1.0" })(argv).pipe(
++      Effect.provide(HistoryPlatformLive),
++      Effect.provide(NodeServices.layer),
++      Effect.scoped,
++    ),
++  );
++  await expect(run([])).resolves.toBeUndefined();
++  for (const argv of [["demo"], ["check", "target.json"], ["serve"], ["import-history", history], ["digest"], ["--help"], ["--version"], ["--completions", "bash"], ["check", "--help"]]) {
++    await expect(run(argv)).resolves.toBeUndefined();
++  }
++  for (const argv of [["check"], ["import-history"]]) {
++    expect(Exit.isFailure(await Effect.runPromise(Effect.exit(
++      Command.runWith(cli, { version: "0.1.0", renderErrors: false })(argv).pipe(
++        Effect.provide(HistoryPlatformLive),
++        Effect.provide(NodeServices.layer),
++        Effect.scoped,
++      ),
++    )))).toBe(true);
++  }
+ });

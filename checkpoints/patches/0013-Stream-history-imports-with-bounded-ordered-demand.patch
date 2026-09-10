@@ -1,0 +1,211 @@
+diff --git a/package.json b/package.json
+index c2e41de..05c91c6 100644
+--- a/package.json
++++ b/package.json
+@@ -22,6 +22,7 @@
+     ,"checkpoint:09": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/checkpoint-07 test/checkpoint-08 test/checkpoint-09 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
+     ,"checkpoint:10": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/checkpoint-07 test/checkpoint-08 test/checkpoint-09 test/checkpoint-10 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
+     ,"checkpoint:11": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/checkpoint-07 test/checkpoint-08 test/checkpoint-09 test/checkpoint-10 test/checkpoint-11 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
++    ,"checkpoint:12": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/checkpoint-07 test/checkpoint-08 test/checkpoint-09 test/checkpoint-10 test/checkpoint-11 test/checkpoint-12 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
+   },
+   "dependencies": {
+     "@effect/platform-node": "4.0.0-rc.112",
+diff --git a/src/services/DigestService.ts b/src/services/DigestService.ts
+index 1162253..e79e45a 100644
+--- a/src/services/DigestService.ts
++++ b/src/services/DigestService.ts
+@@ -1,4 +1,4 @@
+-import { Duration, Effect, Equal, FileSystem, Layer, Path } from "effect";
++import { Duration, Effect, Equal, FileSystem, Layer, Path, Sink, Stream } from "effect";
+ import * as NodeFileSystem from "@effect/platform-node/NodeFileSystem";
+ import * as NodePath from "@effect/platform-node/NodePath";
+ import { HistoryReadError } from "../domain/errors.js";
+@@ -108,29 +108,61 @@ export async function digestFromStream(
+     );
+   return { targets, incidents: [], malformedRows, processedRows };
+ }
+-export const importHistory = (path: string) => Effect.gen(function*() {
++
++const digestFromHistoryStream = (rows: Stream.Stream<CheckResult | MalformedHistoryRow, unknown, FileSystem.FileSystem | Path.Path>) =>
++  Effect.gen(function*() {
++    const byId = new Map<string, CheckResult>();
++    const conflicts = new Set<string>();
++    let malformedRows = 0, processedRows = 0;
++    yield* Stream.run(rows, Sink.forEach((row) => Effect.sync(() => {
++      if (row instanceof MalformedHistoryRow) { malformedRows++; return; }
++      processedRows++;
++      if (conflicts.has(row.id)) return;
++      const old = byId.get(row.id);
++      if (old && !Equal.equals(old, row)) {
++        byId.delete(row.id);
++        conflicts.add(row.id);
++        malformedRows++;
++      } else if (!old) byId.set(row.id, row);
++    })));
++    return yield* Effect.tryPromise({
++      try: () => digestFromStream(byId.values()).then((digest) => ({ ...digest, malformedRows, processedRows })),
++      catch: (cause) => cause,
++    });
++  });
++
++export const historyRows = (path: string) => Stream.unwrap(Effect.gen(function*() {
+   const files = yield* FileSystem.FileSystem;
+   const paths = yield* Path.Path;
+   const resolved = paths.resolve(path);
+-  const text = yield* files.readFileString(resolved).pipe(
+-    Effect.mapError((cause) => new HistoryReadError({ path, cause })),
+-  );
+-  const rows = yield* Effect.promise(() => Promise.all(
+-    text
+-      .split(/\r?\n/)
+-      .filter((x) => x.trim())
+-      .map(async (line, i) => {
+-        try {
+-          return await decodeHistoryLine(line, i + 1);
+-        } catch (e) {
+-          return e as MalformedHistoryRow;
+-        }
+-      }),
+-  ));
+-  return yield* Effect.tryPromise({
+-    try: () => digestFromStream(rows),
+-    catch: (cause) => cause,
++  return Stream.suspend(() => {
++    const decoder = new TextDecoder("utf-8", { fatal: true });
++    return files.stream(resolved).pipe(
++      Stream.map((chunk) => ({ chunk, final: false })),
++      Stream.concat(Stream.succeed({ chunk: new Uint8Array(), final: true })),
++      Stream.mapEffect(({ chunk, final }) => Effect.try({
++        try: () => decoder.decode(chunk, { stream: !final }),
++        catch: (cause) => new HistoryReadError({ path, cause }),
++      })),
++      Stream.splitLines,
++      Stream.filter((line) => line.trim().length > 0),
++      Stream.zipWithIndex,
++      Stream.map(([line, index]) => ({ line, lineNo: index + 1 })),
++      Stream.mapError((cause) => cause instanceof HistoryReadError ? cause : new HistoryReadError({ path, cause })),
++    );
+   });
++}));
++
++export const importHistory = (path: string) => Effect.gen(function*() {
++  const rows = historyRows(path).pipe(
++    Stream.mapEffect(({ line, lineNo }) => Effect.tryPromise({
++      try: () => decodeHistoryLine(line, lineNo),
++      catch: (cause) => cause,
++    }).pipe(
++      Effect.catch((cause) => Effect.succeed(cause instanceof MalformedHistoryRow ? cause : new MalformedHistoryRow(lineNo, String(cause)))),
++    ), { concurrency: 4, unordered: false }),
++  );
++  return yield* digestFromHistoryStream(rows);
+ });
+
+ export const HistoryPlatformLive = Layer.merge(
+@@ -139,8 +171,10 @@ export const HistoryPlatformLive = Layer.merge(
+ );
+
+ export const orderedDigestRows = async <A>(rows: readonly A[], inspect: (row: A) => Promise<A>) =>
+-  {
+-    const completionOrder: A[] = [];
+-    await Promise.all(rows.map(async (row) => completionOrder.push(await inspect(row))));
+-    return completionOrder;
+-  };
++  Effect.runPromise(
++    Stream.fromIterable(rows).pipe(
++      Stream.mapEffect((row) => Effect.promise(() => inspect(row)), { concurrency: 4, unordered: false }),
++      Stream.runCollect,
++      Effect.map((chunk) => Array.from(chunk)),
++    ),
++  );
+diff --git a/test/checkpoint-05/service-seam.test.ts b/test/checkpoint-05/service-seam.test.ts
+index 7dc7023..aabd263 100644
+--- a/test/checkpoint-05/service-seam.test.ts
++++ b/test/checkpoint-05/service-seam.test.ts
+@@ -1,20 +1,24 @@
+-import { expect, it } from "vitest"
+-import { Effect, FileSystem, Layer, Path, Stream } from "effect"
+-import { importHistory } from "../../src/services/DigestService.js"
++import { describe, expect, it } from "vitest";
++import { Effect, FileSystem, Layer, Path, Stream } from "effect";
++import { HistoryPlatformLive, importHistory } from "../../src/services/DigestService.js";
+
+-it("reads history through the injected filesystem capability", async () => {
+-  const digest = await import("../../src/services/" + "DigestService.js") as any
+-  expect(digest.HistoryPlatformLive, "provide the live Node filesystem layer").toBeDefined()
+-  let reads = 0
+-  const fixture = JSON.stringify({ id: "check_fake", targetId: "target_fake", checkedAt: "2026-01-01T00:00:00.000Z", durationMillis: 12, classification: { _tag: "Up" }, response: { status: 200 } })
+-  const read = () => Effect.sync(() => { reads++; return fixture })
+-  const files = FileSystem.makeNoop({ readFileString: read, stream: () => Stream.fromEffect(read().pipe(Effect.map(text => new TextEncoder().encode(text)))) })
+-  const candidate: any = importHistory("virtual/history.ndjson")
+-  const result: any = Effect.isEffect(candidate)
+-    ? await Effect.runPromise((candidate as Effect.Effect<any, any>).pipe(Effect.provide(Layer.succeed(FileSystem.FileSystem)(files)), Effect.provide(Path.layer)) as any)
+-    : await candidate
+-  expect(result.processedRows).toBe(1)
+-  expect(reads).toBe(1)
+-  const live: any = await Effect.runPromise((importHistory("test/fixtures/check-history.ndjson") as any).pipe(Effect.provide(digest.HistoryPlatformLive)))
+-  expect(live.processedRows).toBeGreaterThan(0)
+-})
++const fixture = JSON.stringify({ id: "check_fake", targetId: "target_fake", checkedAt: "2026-01-01T00:00:00.000Z", durationMillis: 12, classification: { _tag: "Up" }, response: { status: 200 } });
++
++describe("history file capability", () => {
++  it("imports fake rows without touching the live filesystem", async () => {
++    let reads = 0;
++    const files = FileSystem.makeNoop({ stream: () => Stream.fromEffect(Effect.sync(() => { reads++; return new TextEncoder().encode(fixture); })) });
++    const digest = await Effect.runPromise(importHistory("virtual/history.ndjson").pipe(
++      Effect.provide(Layer.succeed(FileSystem.FileSystem)(files)),
++      Effect.provide(Path.layer),
++    ));
++    expect(digest.targets.map((target) => target.targetId)).toEqual(["target_fake"]);
++    expect(digest.processedRows).toBe(1);
++    expect(reads).toBe(1);
++  });
++
++  it("keeps the existing fixture compatible with the Node layer", async () => {
++    const digest = await Effect.runPromise(importHistory("test/fixtures/check-history.ndjson").pipe(Effect.provide(HistoryPlatformLive)));
++    expect(digest.processedRows).toBeGreaterThan(0);
++  });
++});
+diff --git a/test/checkpoint-12/lazy-stream.test.ts b/test/checkpoint-12/lazy-stream.test.ts
+new file mode 100644
+index 0000000..fb649a1
+--- /dev/null
++++ b/test/checkpoint-12/lazy-stream.test.ts
+@@ -0,0 +1,38 @@
++import { expect, it } from "vitest"
++import { Effect, FileSystem, Layer, Path, Stream } from "effect"
++import * as DigestService from "../../src/services/DigestService.js"
++
++it("streams lazily with bounded ordered work across Effect and Promise APIs", async () => {
++  const { historyRows, orderedDigestRows } = DigestService as any
++  expect(historyRows, "expose a lazy history stream").toBeDefined()
++
++  let reads = 0
++  const bytes = (text: string) => new TextEncoder().encode(text)
++  const files = FileSystem.makeNoop({ stream: () => Stream.fromEffect(Effect.sync(() => { reads++; return bytes("first\n") })).pipe(Stream.concat(Stream.fromEffect(Effect.sync(() => { reads++; return bytes("second\n") })))) })
++  const values = await Effect.runPromise(historyRows("virtual/history.ndjson").pipe(Stream.take(1), Stream.runCollect, Effect.provide(Layer.succeed(FileSystem.FileSystem)(files)), Effect.provide(Path.layer)))
++  expect(Array.from(values as any)).toEqual([{ line: "first", lineNo: 1 }])
++  expect(reads).toBe(1)
++
++  let active = 0, peak = 0
++  const releases = Array.from({ length: 8 }, () => undefined as undefined | (() => void))
++  const started: Array<() => void> = []
++  const gates = releases.map((_release, index) => new Promise<void>(resolve => {
++    releases[index] = resolve
++  }))
++  const allStarted = new Promise<void>(resolve => { started.push(resolve) })
++  let starts = 0
++  const pending = orderedDigestRows(Array.from({ length: 8 }, (_, n) => n), async (n: number) => {
++    active++; peak = Math.max(peak, active)
++    if (++starts === 4) started[0]!()
++    await gates[n]
++    active--
++    return n
++  })
++  await allStarted
++  expect(peak).toBe(4)
++  for (const release of releases) {
++    release!()
++    await Promise.resolve()
++  }
++  expect(await pending).toEqual([0, 1, 2, 3, 4, 5, 6, 7])
++})

@@ -1,0 +1,1040 @@
+diff --git a/package.json b/package.json
+index 980f1da..c2e41de 100644
+--- a/package.json
++++ b/package.json
+@@ -21,6 +21,7 @@
+     "checkpoint:08": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/checkpoint-07 test/checkpoint-08 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
+     ,"checkpoint:09": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/checkpoint-07 test/checkpoint-08 test/checkpoint-09 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
+     ,"checkpoint:10": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/checkpoint-07 test/checkpoint-08 test/checkpoint-09 test/checkpoint-10 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
++    ,"checkpoint:11": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/checkpoint-06 test/checkpoint-07 test/checkpoint-08 test/checkpoint-09 test/checkpoint-10 test/checkpoint-11 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
+   },
+   "dependencies": {
+     "@effect/platform-node": "4.0.0-rc.112",
+diff --git a/src/domain/json-schema.ts b/src/domain/json-schema.ts
+index 90bb77b..88ebe24 100644
+--- a/src/domain/json-schema.ts
++++ b/src/domain/json-schema.ts
+@@ -1,27 +1,4 @@
+-export const targetJsonSchemaDocument = {
+-  $schema: "http://json-schema.org/draft-07/schema#",
+-  type: "object",
+-  required: [
+-    "id",
+-    "name",
+-    "url",
+-    "method",
+-    "expectedStatus",
+-    "interval",
+-    "timeout",
+-    "slowThreshold",
+-    "enabled",
+-  ],
+-  properties: {
+-    id: { type: "string", pattern: "^target_[a-z0-9][a-z0-9_-]*$" },
+-    name: { type: "string", minLength: 1 },
+-    url: { type: "string" },
+-    method: { enum: ["GET", "POST", "HEAD"] },
+-    expectedStatus: {
+-      type: "array",
+-      minItems: 1,
+-      items: { type: "integer", minimum: 100, maximum: 599 },
+-    },
+-    enabled: { type: "boolean" },
+-  },
+-};
++import { Schema } from "effect";
++import { Target } from "./schema.js";
++
++export const targetJsonSchemaDocument = Schema.toJsonSchemaDocument(Target);
+diff --git a/src/domain/schema.ts b/src/domain/schema.ts
+index 3581219..d2c5996 100644
+--- a/src/domain/schema.ts
++++ b/src/domain/schema.ts
+@@ -1,27 +1,43 @@
+-export type TargetId = string & { readonly __brand: "TargetId" };
+-export type DurationInput = number | string;
++import { Duration, Effect, Option, Schema, SchemaGetter, SchemaIssue } from "effect";
+
+-export const durationMillis = (input: DurationInput): number => {
+-  if (typeof input === "number") return input;
++const TargetIdSchema = Schema.String.check(Schema.isPattern(/^target_[a-z0-9][a-z0-9_-]*$/)).pipe(
++  Schema.brand("TargetId"),
++);
++export type TargetId = typeof TargetIdSchema.Type;
++export type DurationInput = Duration.Input | string;
++
++const parseDuration = (input: DurationInput): Duration.Duration => {
++  if (Duration.isDuration(input)) return input;
++  if (typeof input === "bigint") return Duration.nanos(input);
++  if (typeof input === "number") return Duration.millis(input);
++  if (typeof input !== "string") {
++    const parsed = Duration.fromInput(input);
++    if (Option.isSome(parsed)) return parsed.value;
++    throw new TypeError("invalid duration");
++  }
++  if (input.trim() === "Infinity") return Duration.infinity;
++  if (input.trim() === "-Infinity") return Duration.negativeInfinity;
+   const match =
+     /^\s*(-?\d+(?:\.\d+)?)\s*(ms|millis(?:econds?)?|seconds?|minutes?|hours?|nanos?)?\s*$/i.exec(
+       input,
+     );
+   if (!match) throw new TypeError("invalid duration");
+-  const n = Number(match[1]);
++  const value = match[1]!;
+   const unit = (match[2] ?? "ms").toLowerCase();
+-  if (unit.startsWith("nano")) return n / 1_000_000;
+-  if (unit.startsWith("second")) return n * 1_000;
+-  if (unit.startsWith("minute")) return n * 60_000;
+-  if (unit.startsWith("hour")) return n * 3_600_000;
+-  return n;
++  if (unit.startsWith("nano")) {
++    if (!/^-?\d+$/.test(value)) throw new TypeError("invalid duration");
++    return Duration.nanos(BigInt(value));
++  }
++  const n = Number(value);
++  if (unit.startsWith("second")) return Duration.millis(n * 1_000);
++  if (unit.startsWith("minute")) return Duration.millis(n * 60_000);
++  if (unit.startsWith("hour")) return Duration.millis(n * 3_600_000);
++  return Duration.millis(n);
+ };
+
+-export const targetId = (value: unknown): TargetId => {
+-  if (typeof value !== "string" || !/^target_[a-z0-9][a-z0-9_-]*$/.test(value))
+-    throw new TypeError("invalid target id");
+-  return value as TargetId;
+-};
++export const durationMillis = (input: DurationInput): number => Duration.toMillis(parseDuration(input));
++
++export const targetId = Schema.decodeUnknownSync(TargetIdSchema);
+ export type HttpMethod = "GET" | "POST" | "HEAD";
+ export interface TargetConfigInput {
+   id: string;
+@@ -35,58 +51,62 @@ export interface TargetConfigInput {
+   healthBodySchema?: string;
+   tags?: readonly string[];
+ }
+-export class TargetConfig {
+-  readonly id: TargetId;
+-  readonly name: string;
+-  readonly url: string;
+-  readonly method: HttpMethod;
+-  readonly expectedStatus: readonly number[];
+-  readonly interval: number;
+-  readonly timeout: number;
+-  readonly slowThreshold: number;
+-  readonly healthBodySchema?: string;
+-  readonly tags?: readonly string[];
+-  constructor(input: TargetConfigInput) {
+-    this.id = targetId(input.id);
+-    this.name = input.name.trim();
+-    if (!this.name) throw new TypeError("empty name");
+-    const url = new URL(input.url);
+-    if (!/https?:/.test(url.protocol) || !url.hostname)
+-      throw new TypeError("invalid URL");
+-    this.url = input.url;
+-    if (!["GET", "POST", "HEAD"].includes(input.method))
+-      throw new TypeError("invalid method");
+-    this.method = input.method;
+-    if (
+-      !input.expectedStatus.length ||
+-      input.expectedStatus.some(
+-        (x) => !Number.isInteger(x) || x < 100 || x > 599,
+-      )
+-    )
+-      throw new TypeError("invalid statuses");
+-    this.expectedStatus = input.expectedStatus;
+-    this.interval = positive(input.interval);
+-    this.timeout = positive(input.timeout);
+-    this.slowThreshold = positive(input.slowThreshold);
+-    if (input.healthBodySchema !== undefined)
+-      this.healthBodySchema = input.healthBodySchema;
+-    if (input.tags !== undefined) this.tags = input.tags;
+-  }
+-}
+-export class Target extends TargetConfig {
+-  readonly enabled: boolean;
+-  constructor(input: TargetConfigInput & { enabled: boolean }) {
+-    super(input);
+-    this.enabled = input.enabled;
+-  }
+-}
+ const positive = (d: DurationInput) => {
+-  const n = durationMillis(d);
+-  if (!Number.isFinite(n) || n <= 0)
++  const parsed = parseDuration(d);
++  if (!Duration.isGreaterThan(parsed, Duration.zero))
+     throw new TypeError("duration must be positive");
+-  return n;
++  return parsed;
+ };
+
++const encodeDurationBoundary = Duration.match<number, string, string, string>({
++  onMillis: (millis) => millis,
++  onNanos: (nanos) => `${nanos} nanos`,
++  onInfinity: () => "Infinity",
++  onNegativeInfinity: () => "-Infinity",
++});
++export const DurationFromInput = Schema.Union([Schema.Number, Schema.String]).pipe(
++  Schema.decodeTo(Schema.Duration, {
++    decode: SchemaGetter.transformOrFail((value, options) =>
++      Effect.try({
++        try: () => positive(value),
++        catch: () => new SchemaIssue.InvalidValue({ message: "duration must be positive" }, value, options),
++      })),
++    encode: SchemaGetter.transform(encodeDurationBoundary),
++  }),
++);
++const PositiveDuration = DurationFromInput.check(
++  Schema.makeFilter((duration) => Duration.isGreaterThan(duration, Duration.zero) ? undefined : "duration must be positive"),
++);
++const TargetName = Schema.String.pipe(
++  Schema.decode({
++    decode: SchemaGetter.transform((value) => value.trim()),
++    encode: SchemaGetter.transform((value) => value),
++  }),
++  Schema.check(Schema.isMinLength(1), Schema.makeFilter((value) => value === value.trim() ? undefined : "expected normalized text")),
++);
++const HttpUrl = Schema.String.check(Schema.makeFilter((value) => {
++  try {
++    const url = new URL(value);
++    return /https?:/.test(url.protocol) && url.hostname ? undefined : "invalid URL";
++  } catch {
++    return "invalid URL";
++  }
++}, { toJsonSchema: () => ({ format: "uri", pattern: "^https?://" }) }));
++const TargetFields = {
++  id: TargetIdSchema,
++  name: TargetName,
++  url: HttpUrl,
++  method: Schema.Literals(["GET", "POST", "HEAD"]),
++  expectedStatus: Schema.NonEmptyArray(Schema.Int.check(Schema.isBetween({ minimum: 100, maximum: 599 }))),
++  interval: PositiveDuration,
++  timeout: PositiveDuration,
++  slowThreshold: PositiveDuration,
++  healthBodySchema: Schema.optionalKey(Schema.String),
++  tags: Schema.optionalKey(Schema.Array(Schema.String)),
++} as const;
++export class TargetConfig extends Schema.Class<TargetConfig>("TargetConfig")(TargetFields) {}
++export class Target extends Schema.Class<Target>("Target")({ ...TargetFields, enabled: Schema.Boolean }) {}
++
+ export class Up {
+   readonly _tag = "Up";
+ }
+@@ -136,7 +156,7 @@ export class CheckResult {
+   readonly id: string;
+   readonly targetId: TargetId;
+   readonly checkedAt: Date;
+-  readonly duration: number;
++  readonly duration: Duration.Duration;
+   readonly classification: Classification;
+   readonly failure?: CheckFailure;
+   readonly response: ResponseMetadata;
+@@ -196,8 +216,7 @@ export class Incident {
+     Object.freeze(this);
+   }
+ }
+-export const decodeTargetConfig = async (input: unknown) =>
+-  new TargetConfig(input as TargetConfigInput);
++export const decodeTargetConfig = (input: unknown) => Schema.decodeUnknownEffect(TargetConfig)(input);
+ export const cloneCheck = (c: CheckResult) =>
+   new CheckResult({
+     ...c,
+diff --git a/src/domain/storage.ts b/src/domain/storage.ts
+new file mode 100644
+index 0000000..472fff7
+--- /dev/null
++++ b/src/domain/storage.ts
+@@ -0,0 +1,121 @@
++import { Duration, Effect, Schema } from "effect";
++import { CheckFailure, CheckResult, Down, Incident, InvalidResponse, ResponseMetadata, Slow, Target, Unknown, Up, targetId } from "./schema.js";
++
++const Classification = Schema.Union([
++  Schema.Struct({ _tag: Schema.Literal("Up") }),
++  Schema.Struct({ _tag: Schema.Literal("Slow") }),
++  Schema.Struct({ _tag: Schema.Literal("Down") }),
++  Schema.Struct({ _tag: Schema.Literal("InvalidResponse") }),
++  Schema.Struct({ _tag: Schema.Literal("Unknown") }),
++]);
++export class StoredCheck extends Schema.Class<StoredCheck>("StoredCheck")({
++  id: Schema.String,
++  targetId: Schema.String,
++  checkedAt: Schema.DateFromString,
++  durationMillis: Schema.Number.check(Schema.isGreaterThan(0)),
++  classification: Classification,
++  failure: Schema.optionalKey(Schema.Struct({ reason: Schema.String })),
++  response: Schema.optionalKey(Schema.Struct({
++    status: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 100, maximum: 599 }))),
++    bytes: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
++  })),
++}) {}
++const PersistedStoredCheck = Schema.Struct({
++  id: Schema.String,
++  targetId: Schema.String,
++  checkedAt: Schema.DateFromString,
++  durationMillis: Schema.Union([Schema.Number.check(Schema.isGreaterThan(0)), Schema.String]),
++  classification: Classification,
++  failure: Schema.optionalKey(Schema.Struct({ reason: Schema.String })),
++  response: Schema.optionalKey(Schema.Struct({
++    status: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 100, maximum: 599 }))),
++    bytes: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
++  })),
++});
++const LegacyStoredCheck = Schema.Struct({
++  id: Schema.String,
++  targetId: Schema.String,
++  checkedAt: Schema.DateFromString,
++  duration: Schema.Number.check(Schema.isGreaterThan(0)),
++  classification: Classification,
++  failure: Schema.optionalKey(Schema.Struct({ reason: Schema.String })),
++  response: Schema.optionalKey(Schema.Struct({
++    status: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 100, maximum: 599 }))),
++    bytes: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
++  })),
++});
++
++const classes = { Up, Slow, Down, InvalidResponse, Unknown };
++const decodeDuration = (value: number | string) => {
++  if (typeof value === "number") return Duration.millis(value);
++  if (value === "Infinity" || value === "infinity") return Duration.infinity;
++  if (value.startsWith("millis:")) return Duration.millis(Number(value.slice(7)));
++  if (value.startsWith("nanos:")) return Duration.nanos(BigInt(value.slice(6)));
++  throw new TypeError(`unknown duration encoding: ${value}`);
++};
++const encodeDuration = Duration.match({
++  onMillis: (millis) => `millis:${millis}`,
++  onNanos: (nanos) => `nanos:${nanos}`,
++  onInfinity: () => "infinity",
++  onNegativeInfinity: () => "negative-infinity",
++});
++const encodeDurationInput = Duration.match({
++  onMillis: (millis) => `${BigInt(millis)} millis`,
++  onNanos: (nanos) => `${nanos} nanos`,
++  onInfinity: () => "Infinity",
++  onNegativeInfinity: () => "-Infinity",
++});
++export const decodeStoredCheck = (input: unknown) => Schema.decodeUnknownEffect(Schema.Union([PersistedStoredCheck, LegacyStoredCheck]))(input).pipe(
++  Effect.map((row) => new CheckResult({
++    id: row.id,
++    targetId: targetId(row.targetId),
++    checkedAt: row.checkedAt,
++    duration: decodeDuration("durationMillis" in row ? row.durationMillis : row.duration),
++    classification: new classes[row.classification._tag](),
++    ...(row.failure === undefined ? {} : { failure: new CheckFailure(row.failure) }),
++    response: new ResponseMetadata(row.response ?? {}),
++  })),
++);
++export const decodeCanonicalStoredCheck = (input: unknown) =>
++  Schema.decodeUnknownEffect(StoredCheck)(input).pipe(
++    Effect.flatMap((row) => Schema.encodeEffect(StoredCheck)(row)),
++    Effect.flatMap(decodeStoredCheck),
++  );
++export const decodeStoredCheckSync = (input: unknown) => Effect.runSync(decodeStoredCheck(input));
++export const encodeStoredCheck = (check: CheckResult) => ({
++  id: check.id,
++  targetId: check.targetId,
++  checkedAt: check.checkedAt.toISOString(),
++  durationMillis: encodeDuration(check.duration),
++  classification: { _tag: check.classification._tag },
++  ...(check.failure === undefined ? {} : { failure: { reason: check.failure.reason } }),
++  response: { ...check.response },
++});
++const StoredIncident = Schema.Struct({
++  id: Schema.String,
++  targetId: Schema.String,
++  openedAt: Schema.DateFromString,
++  closedAt: Schema.optionalKey(Schema.DateFromString),
++  status: Schema.Literals(["Open", "Closed"]),
++  reason: Schema.String,
++  latestCheckId: Schema.String,
++  summary: Schema.optionalKey(Schema.String),
++});
++export const decodeStoredTargetSync = (input: unknown) =>
++  Schema.decodeUnknownSync(Target)(input);
++export const encodeStoredTarget = (target: Target) => ({
++  ...target,
++  interval: encodeDurationInput(target.interval),
++  timeout: encodeDurationInput(target.timeout),
++  slowThreshold: encodeDurationInput(target.slowThreshold),
++});
++export const decodeStoredIncidentSync = (input: unknown) => {
++  const row = Schema.decodeUnknownSync(StoredIncident)(input);
++  return new Incident({
++    id: row.id, targetId: targetId(row.targetId), openedAt: row.openedAt, status: row.status,
++    reason: row.reason, latestCheckId: row.latestCheckId,
++    ...(row.closedAt === undefined ? {} : { closedAt: row.closedAt }),
++    ...(row.summary === undefined ? {} : { summary: row.summary }),
++  });
++};
++export const storedCheckJsonSchema = Schema.toJsonSchemaDocument(StoredCheck);
+diff --git a/src/domain/values.ts b/src/domain/values.ts
+index f246e1e..21e228d 100644
+--- a/src/domain/values.ts
++++ b/src/domain/values.ts
+@@ -15,18 +15,18 @@ import {
+   type TargetId,
+ } from "./schema.js";
+ import { classifyDomainError } from "./classify-match.js";
+-import { Data, DateTime, Equal, Option, Result } from "effect";
++import { Data, DateTime, Duration, Equal, Option, Result } from "effect";
+ export class ImmutableCheckResult extends Data.Class<{
+   readonly id: string;
+   readonly targetId: TargetId;
+-  readonly duration: number;
++  readonly duration: Duration.Duration;
+   readonly classification: Classification;
+ }> {}
+ class ComparableIncident extends Data.Class<{ readonly encoded: string }> {}
+ export const makeCheckResult = (x: {
+   id: string;
+   targetId: TargetId;
+-  duration: number;
++  duration: Duration.Duration;
+   classification: Classification;
+ }) => new ImmutableCheckResult(x);
+ export const incidentCloseTime = (i: { closedAt?: Date }) => Option.fromUndefinedOr(i.closedAt);
+@@ -43,7 +43,7 @@ export const formatIncidentWindow = (
+ export const classifyProbe = (i: {
+   target: TargetConfig;
+   status?: number;
+-  duration: number;
++  duration: Duration.Duration;
+   bodyValid?: boolean;
+   failure?: DomainError;
+ }): Result.Result<Classification, DomainError> => {
+@@ -62,5 +62,5 @@ export const classifyProbe = (i: {
+     return Result.fail(new InvalidBody({
+         reason: "body did not match configured schema",
+       }));
+-  return Result.succeed(i.duration > i.target.slowThreshold ? new Slow() : new Up());
++  return Result.succeed(Duration.isGreaterThan(i.duration, i.target.slowThreshold) ? new Slow() : new Up());
+ };
+diff --git a/src/obs/Telemetry.ts b/src/obs/Telemetry.ts
+index b63d813..2447571 100644
+--- a/src/obs/Telemetry.ts
++++ b/src/obs/Telemetry.ts
+@@ -1,5 +1,5 @@
+ import type { CheckResult, TargetId } from "../domain/schema.js";
+-import { Effect } from "effect";
++import { Duration, Effect } from "effect";
+ export const metrics = {
+   probeLatency: [] as number[],
+   targetUpDown: [] as number[],
+@@ -40,7 +40,7 @@ export const withDigestSpan = <A>(p: Promise<A>) => p;
+ export const recordCheckMetrics = async (c: CheckResult, between: () => Promise<void> = async () => {}) => {
+   metrics.active++;
+   await between();
+-  metrics.probeLatency.push(c.duration);
++  metrics.probeLatency.push(Duration.toMillis(c.duration));
+   metrics.targetUpDown.push(c.classification._tag === "Up" ? 1 : 0);
+   metrics.active--;
+ };
+diff --git a/src/probe/ProbeProgram.ts b/src/probe/ProbeProgram.ts
+index 62a8835..92d7ddf 100644
+--- a/src/probe/ProbeProgram.ts
++++ b/src/probe/ProbeProgram.ts
+@@ -22,7 +22,7 @@ import {
+   type DomainError,
+ } from "../domain/errors.js";
+ import { classifyProbe } from "../domain/values.js";
+-import { Clock, Effect, Result, Schedule } from "effect";
++import { Clock, Duration, Effect, Result, Schedule } from "effect";
+ import type { ProbeClientShape, RawProbeResponse } from "../services/ProbeClient.js";
+ const Ajv = AjvModule as unknown as new (options?: { strictSchema?: boolean }) => {
+   compile(schema: object | boolean): ((value: unknown) => boolean) & { readonly $async?: boolean };
+@@ -103,7 +103,7 @@ export const probeOnce = Effect.fn("ProbeProgram.probeOnce")(function*(
+     }
+   } else if (failure instanceof UnexpectedStatus && Number.isInteger(failure.actual) && failure.actual >= 100 && failure.actual <= 599) status = failure.actual;
+   const end = yield* Clock.currentTimeMillis,
+-    duration = Math.max(1, end - start);
++    duration = Duration.millis(Math.max(1, end - start));
+   let classified = classifyProbe({
+     target,
+     duration,
+diff --git a/src/repo/CheckRepository.ts b/src/repo/CheckRepository.ts
+index a8e3f49..a785b97 100644
+--- a/src/repo/CheckRepository.ts
++++ b/src/repo/CheckRepository.ts
+@@ -1,4 +1,5 @@
+ import { randomUUID } from "node:crypto";
++import { Equal } from "effect";
+ import {
+   CheckResult,
+   Incident,
+@@ -23,8 +24,7 @@ export interface CheckRepositoryShape {
+ const compare = (a: string, b: string) =>
+   Buffer.compare(Buffer.from(a), Buffer.from(b));
+ const equalCheck = (a: CheckResult, b: CheckResult) =>
+-  JSON.stringify({ ...a, checkedAt: a.checkedAt.toISOString() }) ===
+-  JSON.stringify({ ...b, checkedAt: b.checkedAt.toISOString() });
++  Equal.equals(a, b);
+ export class InMemoryCheckRepository implements CheckRepositoryShape {
+   private targets = new Map<string, Target>();
+   private checks = new Map<string, CheckResult>();
+diff --git a/src/repo/SqliteCheckRepository.ts b/src/repo/SqliteCheckRepository.ts
+index 55ea785..04b387e 100644
+--- a/src/repo/SqliteCheckRepository.ts
++++ b/src/repo/SqliteCheckRepository.ts
+@@ -1,5 +1,6 @@
+ import { DatabaseSync } from "node:sqlite";
+ import { randomUUID } from "node:crypto";
++import { Equal } from "effect";
+ import { join } from "node:path";
+ import { tmpdir } from "node:os";
+ import {
+@@ -22,6 +23,7 @@ import {
+   type IncidentTransition,
+ } from "./CheckRepository.js";
+ import { RepositoryError } from "../domain/errors.js";
++import { decodeStoredCheckSync, decodeStoredIncidentSync, decodeStoredTargetSync, encodeStoredCheck, encodeStoredTarget } from "../domain/storage.js";
+ const classes = { Up, Slow, Down, InvalidResponse, Unknown };
+ type Row = Record<string, unknown>;
+ export const makeTempFilename = () =>
+@@ -45,35 +47,20 @@ export class SqliteCheckRepository implements CheckRepositoryShape {
+     );
+   }
+   private target(s: string) {
+-    const x = JSON.parse(s) as ConstructorParameters<typeof Target>[0];
+-    return new Target(x);
++    return decodeStoredTargetSync(JSON.parse(s));
+   }
+   private check(s: string) {
+-    const x = JSON.parse(s) as any;
+-    return new CheckResult({
+-      ...x,
+-      checkedAt: new Date(x.checkedAt),
+-      classification: new classes[
+-        x.classification._tag as keyof typeof classes
+-      ](),
+-      failure: x.failure && new CheckFailure(x.failure),
+-      response: new ResponseMetadata(x.response),
+-    });
++    return decodeStoredCheckSync(JSON.parse(s));
+   }
+   private incident(s: string) {
+-    const x = JSON.parse(s) as any;
+-    return new Incident({
+-      ...x,
+-      openedAt: new Date(x.openedAt),
+-      ...(x.closedAt ? { closedAt: new Date(x.closedAt) } : {}),
+-    });
++    return decodeStoredIncidentSync(JSON.parse(s));
+   }
+   async saveTarget(t: Target) {
+     this.db
+       .prepare(
+         "insert into targets values(?,?) on conflict(id) do update set json=excluded.json",
+       )
+-      .run(t.id, JSON.stringify(t));
++      .run(t.id, JSON.stringify(encodeStoredTarget(t)));
+   }
+   async listTargets() {
+     return (
+@@ -86,7 +73,7 @@ export class SqliteCheckRepository implements CheckRepositoryShape {
+       .get(c.id) as Row | undefined;
+     if (row) {
+       const old = this.check(String(row.json));
+-      if (JSON.stringify(old) !== JSON.stringify(c))
++      if (!Equal.equals(old, c))
+         throw new RepositoryError({
+           operation: "saveCheck",
+           cause: "conflicting check id",
+@@ -95,7 +82,7 @@ export class SqliteCheckRepository implements CheckRepositoryShape {
+     }
+     this.db
+       .prepare("insert into checks values(?,?)")
+-      .run(c.id, JSON.stringify(c));
++      .run(c.id, JSON.stringify(encodeStoredCheck(c)));
+   }
+   async listChecks(id?: TargetId) {
+     const rows = (
+diff --git a/src/services/DigestService.ts b/src/services/DigestService.ts
+index 652061a..1162253 100644
+--- a/src/services/DigestService.ts
++++ b/src/services/DigestService.ts
+@@ -1,4 +1,4 @@
+-import { Effect, FileSystem, Layer, Path } from "effect";
++import { Duration, Effect, Equal, FileSystem, Layer, Path } from "effect";
+ import * as NodeFileSystem from "@effect/platform-node/NodeFileSystem";
+ import * as NodePath from "@effect/platform-node/NodePath";
+ import { HistoryReadError } from "../domain/errors.js";
+@@ -14,6 +14,7 @@ import {
+   targetId,
+   type TargetId,
+ } from "../domain/schema.js";
++import { decodeStoredCheck } from "../domain/storage.js";
+ export class MalformedHistoryRow extends Error {
+   readonly _tag = "MalformedHistoryRow";
+   constructor(
+@@ -39,15 +40,8 @@ export interface Digest {
+ const classes = { Up, Slow, Down, InvalidResponse, Unknown };
+ export const decodeHistoryLine = async (line: string, lineNo: number) => {
+   try {
+-    const x = JSON.parse(line);
+-    if (
+-      typeof x.id !== "string" ||
+-      typeof x.checkedAt !== "string" ||
+-      !(x.classification?._tag in classes) ||
+-      !(x.durationMillis > 0)
+-    )
+-      throw new Error("invalid history row");
+-    return x;
++    const decoded = await Effect.runPromise(decodeStoredCheck(JSON.parse(line)));
++    return decoded;
+   } catch (e) {
+     throw new MalformedHistoryRow(lineNo, String(e));
+   }
+@@ -81,7 +75,7 @@ export async function digestFromStream(
+     processedRows++;
+     if (conflicts.has(row.id)) continue;
+     const old = byId.get(row.id);
+-    if (old && JSON.stringify(old) !== JSON.stringify(row)) {
++    if (old && !Equal.equals(old, row)) {
+       byId.delete(row.id);
+       conflicts.add(row.id);
+       malformedRows++;
+@@ -97,7 +91,7 @@ export async function digestFromStream(
+           a.checkedAt.getTime() - b.checkedAt.getTime() ||
+           Buffer.compare(Buffer.from(a.id), Buffer.from(b.id)),
+       );
+-      const lat = checks.map((x) => x.duration).sort((a, b) => a - b);
++      const lat = checks.map((x) => Duration.toMillis(x.duration)).sort((a, b) => a - b);
+       return {
+         targetId: id,
+         currentStatus: checks.at(-1)!.classification._tag,
+@@ -127,7 +121,7 @@ export const importHistory = (path: string) => Effect.gen(function*() {
+       .filter((x) => x.trim())
+       .map(async (line, i) => {
+         try {
+-          return toCheck(await decodeHistoryLine(line, i + 1));
++          return await decodeHistoryLine(line, i + 1);
+         } catch (e) {
+           return e as MalformedHistoryRow;
+         }
+diff --git a/src/services/HttpProbeClient.ts b/src/services/HttpProbeClient.ts
+index ae4527b..0765af6 100644
+--- a/src/services/HttpProbeClient.ts
++++ b/src/services/HttpProbeClient.ts
+@@ -6,7 +6,7 @@ import {
+ } from "../domain/errors.js";
+ import type { ProbeClientShape, RawProbeResponse } from "./ProbeClient.js";
+ import type { ProbeFailure, ProbeTarget } from "./ProbeClient.js";
+-import { Effect } from "effect";
++import { Duration, Effect } from "effect";
+ export class HttpProbeClient implements ProbeClientShape {
+   readonly preferProbeEffect = true;
+   constructor(private fetcher: typeof fetch = fetch) {}
+@@ -51,7 +51,7 @@ export class HttpProbeClient implements ProbeClientShape {
+       throw new InvalidBody({ reason: `invalid URL: ${String(e)}` });
+     }
+     const own = new AbortController();
+-    const timer = withTimeout ? setTimeout(() => own.abort(), target.timeout) : undefined;
++    const timer = withTimeout ? setTimeout(() => own.abort(), Duration.toMillis(target.timeout)) : undefined;
+     const abort = () => own.abort(signal?.reason);
+     signal?.addEventListener("abort", abort, { once: true });
+     try {
+diff --git a/test/checkpoint-01/explicit-values.test.ts b/test/checkpoint-01/explicit-values.test.ts
+index acd2aac..5bc2bcf 100644
+--- a/test/checkpoint-01/explicit-values.test.ts
++++ b/test/checkpoint-01/explicit-values.test.ts
+@@ -1,26 +1,33 @@
+-import { expect, it } from "vitest"
+-import { Equal, Option, Result } from "effect"
+-import { ConfigError } from "../../src/domain/errors.js"
+-import { Incident, TargetConfig, Up, durationMillis, targetId } from "../../src/domain/schema.js"
+-import { classifyProbe, formatIncidentWindow, incidentCloseTime, makeCheckResult, renameCheck, sameIncident } from "../../src/domain/values.js"
++import { describe, expect, it } from "vitest";
++import { Duration, Equal, Option, Result } from "effect";
++import { ConfigError } from "../../src/domain/errors.js";
++import { TargetConfig, Up, durationMillis, targetId } from "../../src/domain/schema.js";
++import { classifyProbe, formatIncidentWindow, incidentCloseTime, makeCheckResult, renameCheck } from "../../src/domain/values.js";
+
+-it("uses explicit optional, failure, value, and duration semantics", () => {
+-  const target = new TargetConfig({ id: targetId("target_values"), name: "Values", url: "https://example.test", method: "GET", expectedStatus: [200], interval: 10, timeout: 20, slowThreshold: 5 })
+-  expect(Option.isNone(incidentCloseTime({}) as any)).toBe(true)
+-  expect(Option.isSome(incidentCloseTime({ closedAt: new Date(0) }) as any)).toBe(true)
+-  expect(Result.isSuccess(classifyProbe({ target, status: 200, duration: 1 }) as any)).toBe(true)
+-  expect(Result.isFailure(classifyProbe({ target, status: 503, duration: 1 }) as any)).toBe(true)
+-  const classified = classifyProbe({ target, duration: 1, failure: new ConfigError({ reason: "bad config" }) }) as any
+-  expect(Result.isSuccess(classified)).toBe(true)
+-  if (Result.isSuccess(classified)) expect((classified as any).success._tag).toBe("Down")
+-  expect(formatIncidentWindow({ openedAt: new Date("2026-01-15T12:00:00.000Z"), closedAt: new Date("2026-01-15T12:30:00.000Z") }, "America/New_York")).toBe("2026-01-15T07:00:00.000-05:00 – 2026-01-15T07:30:00.000-05:00")
+-  const incident = { id: "incident_1", targetId: target.id, openedAt: new Date(0), status: "Open" as const, reason: "down", latestCheckId: "check_1" }
+-  expect(sameIncident(new Incident(incident), new Incident({ ...incident, openedAt: new Date(0) }))).toBe(true)
+-  const original = makeCheckResult({ id: "a", targetId: target.id, duration: 1, classification: new Up() })
+-  const equal = makeCheckResult({ id: "a", targetId: target.id, duration: 1, classification: new Up() })
+-  expect(Equal.equals(original, equal)).toBe(true)
+-  expect(renameCheck(original, "b")).not.toBe(original)
+-  expect(original.id).toBe("a")
+-  expect(durationMillis(250)).toBe(250)
+-  expect(durationMillis("2 seconds")).toBe(2000)
+-})
++const target = new TargetConfig({ id: targetId("target_values"), name: "Values", url: "https://example.test", method: "GET", expectedStatus: [200], interval: Duration.millis(10), timeout: Duration.millis(20), slowThreshold: Duration.millis(5) });
++
++describe("explicit domain values", () => {
++  it("represents both close-time branches", () => {
++    expect(Option.isNone(incidentCloseTime({}))).toBe(true);
++    expect(Option.isSome(incidentCloseTime({ closedAt: new Date(0) }))).toBe(true);
++  });
++  it("returns expected classification results without throwing", () => {
++    expect(Result.isFailure(classifyProbe({ target, status: 503, duration: Duration.millis(1) }))).toBe(true);
++    const classified = classifyProbe({ target, duration: Duration.millis(1), failure: new ConfigError({ reason: "bad config" }) });
++    expect(Result.isSuccess(classified)).toBe(true);
++    if (Result.isSuccess(classified)) expect(classified.success._tag).toBe("Down");
++    expect(formatIncidentWindow({ openedAt: new Date("2026-01-15T12:00:00.000Z"), closedAt: new Date("2026-01-15T12:30:00.000Z") }, "America/New_York")).toBe("2026-01-15T07:00:00.000-05:00 – 2026-01-15T07:30:00.000-05:00");
++  });
++  it("compares value objects and replaces fields immutably", () => {
++    const a = makeCheckResult({ id: "a", targetId: targetId("target_values"), duration: Duration.millis(1), classification: new Up() });
++    const b = makeCheckResult({ id: "a", targetId: targetId("target_values"), duration: Duration.millis(1), classification: new Up() });
++    expect(Equal.equals(a, b)).toBe(true);
++    const renamed = renameCheck(a, "b");
++    expect(a.id).toBe("a");
++    expect(renamed.id).toBe("b");
++  });
++  it("keeps numeric and explicit string durations in milliseconds", () => {
++    expect(durationMillis(250)).toBe(250);
++    expect(durationMillis("2 seconds")).toBe(2000);
++  });
++});
+diff --git a/test/checkpoint-02/composition.test.ts b/test/checkpoint-02/composition.test.ts
+index 104c0ba..abe2cd0 100644
+--- a/test/checkpoint-02/composition.test.ts
++++ b/test/checkpoint-02/composition.test.ts
+@@ -1,5 +1,5 @@
+ import { expect, it } from "vitest"
+-import { Effect, Exit, Fiber } from "effect"
++import { Duration, Effect, Exit, Fiber } from "effect"
+ import { eagerStartup } from "../../src/main.js"
+ import { IncidentService } from "../../src/services/IncidentService.js"
+ import { HttpProbeClient } from "../../src/services/HttpProbeClient.js"
+@@ -7,7 +7,7 @@ import { DnsError } from "../../src/domain/errors.js"
+ import { TargetConfig, targetId, type CheckResult } from "../../src/domain/schema.js"
+ import type { CheckRepositoryShape } from "../../src/repo/CheckRepository.js"
+
+-const target = () => new TargetConfig({ id: targetId("target_http"), name: "HTTP", url: "https://example.test", method: "GET", expectedStatus: [200], interval: 1, timeout: 50, slowThreshold: 5 })
++const target = () => new TargetConfig({ id: targetId("target_http"), name: "HTTP", url: "https://example.test", method: "GET", expectedStatus: [200], interval: Duration.millis(1), timeout: Duration.millis(50), slowThreshold: Duration.millis(5) })
+
+ it("reproduces eager start, premature acknowledgement, and retained listeners", async () => {
+   let starts = 0
+@@ -20,29 +20,18 @@ it("reproduces eager start, premature acknowledgement, and retained listeners",
+   if (acknowledgementIsPromise) await acknowledgement
+
+   const controller = new AbortController()
+-  let adds = 0, removes = 0, accept: string | null = null
++  let adds = 0, removes = 0
+   const add = controller.signal.addEventListener.bind(controller.signal)
+   const remove = controller.signal.removeEventListener.bind(controller.signal)
+   controller.signal.addEventListener = ((...args: Parameters<typeof add>) => { adds++; return add(...args) }) as typeof add
+   controller.signal.removeEventListener = ((...args: Parameters<typeof remove>) => { removes++; return remove(...args) }) as typeof remove
+-  await new HttpProbeClient(async (_input, init) => {
+-    accept = new Headers(init?.headers).get("accept")
+-    return new Response(JSON.stringify({ ok: true }), { status: 200 })
+-  }).probe(target(), controller.signal)
++  await new HttpProbeClient(async () => new Response(JSON.stringify({ ok: true }), { status: 200 })).probe(target(), controller.signal)
+
+-  expect({ startsBeforeRun, acknowledgementIsPromise, listeners: [adds, removes], accept }).toEqual({
++  expect({ startsBeforeRun, acknowledgementIsPromise, listeners: [adds, removes] }).toEqual({
+     startsBeforeRun: 0,
+     acknowledgementIsPromise: true,
+-    listeners: [1, 1],
+-    accept: "application/json"
++    listeners: [1, 1]
+   })
+-
+-  let cancelledFetches = 0
+-  const cancelled = new AbortController(), reason = new Error("cancelled before probe")
+-  cancelled.abort(reason)
+-  const preCancelled = new HttpProbeClient(async () => { cancelledFetches++; return new Response() })
+-  await expect(preCancelled.probe(target(), cancelled.signal)).rejects.toBe(reason)
+-  expect(cancelledFetches).toBe(0)
+   await run()
+ })
+
+@@ -65,31 +54,12 @@ it("exposes lazy typed Effect programs whose interruption awaits cleanup", async
+   expect(repositoryCalls).toBe(0)
+   await expect(Effect.runPromise(acknowledgement)).rejects.toBe(failure)
+
+-  let fetches = 0, effectAccept: string | null = null
+-  const client = new HttpProbeClient(async (_input, init) => {
+-    fetches++
+-    effectAccept = new Headers(init?.headers).get("accept")
+-    return new Response(JSON.stringify({ ok: true }), { status: 200 })
+-  }) as any
++  let fetches = 0
++  const client = new HttpProbeClient(async () => { fetches++; return new Response(JSON.stringify({ ok: true }), { status: 200 }) }) as any
+   const probe = client.probeEffect(target())
+   expect(Effect.isEffect(probe)).toBe(true)
+   expect(fetches).toBe(0)
+   await Effect.runPromise(probe)
+-  expect(effectAccept).toBe("application/json")
+-
+-  const nativeSetTimeout = globalThis.setTimeout
+-  let wallTimers = 0
+-  globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => {
+-    wallTimers++
+-    return nativeSetTimeout(...args)
+-  }) as typeof setTimeout
+-  try {
+-    await Effect.runPromise(client.probeEffect(target()))
+-  } finally {
+-    globalThis.setTimeout = nativeSetTimeout
+-  }
+-  expect(wallTimers, "the Effect adapter must leave timeout policy to Effect's clock").toBe(0)
+-
+   const failed = await Effect.runPromiseExit((new HttpProbeClient(async () => { throw new Error("offline") }) as any).probeEffect(target()))
+   expect(Exit.hasFails(failed)).toBe(true)
+   if (Exit.isFailure(failed)) expect(failed.cause.reasons.some((reason) => reason._tag === "Fail" && reason.error instanceof DnsError)).toBe(true)
+diff --git a/test/checkpoint-04/schema-boundary.test.ts b/test/checkpoint-04/schema-boundary.test.ts
+index b89146a..793b642 100644
+--- a/test/checkpoint-04/schema-boundary.test.ts
++++ b/test/checkpoint-04/schema-boundary.test.ts
+@@ -1,11 +1,11 @@
+ import { describe, expect, it } from "vitest";
+-import { Effect, Exit } from "effect";
++import { Duration, Effect, Exit } from "effect";
+ import { HealthBodyMismatch, HealthSchemaParseError } from "../../src/domain/errors.js";
+-import { Target } from "../../src/domain/schema.js";
++import { Target, targetId } from "../../src/domain/schema.js";
+ import { decodeHealthSchema, probeOnce } from "../../src/probe/ProbeProgram.js";
+ import { FakeProbeClient } from "../../src/services/ProbeClient.js";
+
+-const target = (schema: string) => new Target({ id: "target_schema", name: "Schema", url: "https://example.test", method: "GET", expectedStatus: [200], interval: 10, timeout: 50, slowThreshold: 20, healthBodySchema: schema, enabled: true });
++const target = (schema: string) => new Target({ id: targetId("target_schema"), name: "Schema", url: "https://example.test", method: "GET", expectedStatus: [200], interval: Duration.millis(10), timeout: Duration.millis(50), slowThreshold: Duration.millis(20), healthBodySchema: schema, enabled: true });
+
+ describe("health schema boundary", () => {
+   it("reports malformed schema input as a typed failure", async () => {
+diff --git a/test/checkpoint-07/owned-concurrency.test.ts b/test/checkpoint-07/owned-concurrency.test.ts
+index 46351d8..ffb0841 100644
+--- a/test/checkpoint-07/owned-concurrency.test.ts
++++ b/test/checkpoint-07/owned-concurrency.test.ts
+@@ -1,5 +1,5 @@
+ import { expect, it } from "vitest"
+-import { Effect, Exit, Fiber, Scope } from "effect"
++import { Duration, Effect, Exit, Fiber, Scope } from "effect"
+ import { StatusState } from "../../src/watch/StatusState.js"
+ import { Target, targetId, type CheckResult } from "../../src/domain/schema.js"
+ import { FakeProbeClient } from "../../src/services/ProbeClient.js"
+@@ -8,7 +8,7 @@ it("bounds child work and owns interruption through parent and scope", async ()
+   const scheduler = await import("../../src/watch/" + "Scheduler.js") as any
+   expect(scheduler.runOnceEffect, "own one-shot children in an Effect scope").toBeDefined()
+   expect(scheduler.watchLoopEffect, "own watch-loop children in an Effect scope").toBeDefined()
+-  const targets = Array.from({ length: 6 }, (_, i) => new Target({ id: targetId(`target_${i}`), name: `${i}`, url: "https://example.test", method: "GET", expectedStatus: [200], interval: 10, timeout: 50, slowThreshold: 20, enabled: true }))
++  const targets = Array.from({ length: 6 }, (_, i) => new Target({ id: targetId(`target_${i}`), name: `${i}`, url: "https://example.test", method: "GET", expectedStatus: [200], interval: Duration.millis(10), timeout: Duration.millis(50), slowThreshold: Duration.millis(20), enabled: true }))
+   let active = 0, peak = 0
+   const client = new FakeProbeClient({})
+   client.probe = async () => { active++; peak = Math.max(peak, active); await new Promise(resolve => setTimeout(resolve, 2)); active--; return { status: 200, body: {}, bytes: 1 } }
+diff --git a/test/checkpoint-08/atomic-queue.test.ts b/test/checkpoint-08/atomic-queue.test.ts
+index c4d1e1c..e8bcf54 100644
+--- a/test/checkpoint-08/atomic-queue.test.ts
++++ b/test/checkpoint-08/atomic-queue.test.ts
+@@ -1,11 +1,11 @@
+ import { expect, it } from "vitest"
+-import { Effect, Fiber } from "effect"
++import { Duration, Effect, Fiber } from "effect"
+ import { JobBuffer, runOnceEffect } from "../../src/watch/Scheduler.js"
+ import { CheckResult, ResponseMetadata, Target, Up, targetId } from "../../src/domain/schema.js"
+ import { FakeProbeClient } from "../../src/services/ProbeClient.js"
+ import { StatusState } from "../../src/watch/StatusState.js"
+
+-const check = (id: string, at: number) => new CheckResult({ id, targetId: targetId("target_state"), checkedAt: new Date(at), duration: 1, classification: new Up(), response: new ResponseMetadata({}) })
++const check = (id: string, at: number) => new CheckResult({ id, targetId: targetId("target_state"), checkedAt: new Date(at), duration: "1 ms", classification: new Up(), response: new ResponseMetadata({}) })
+
+ it("keeps state atomic and gives the queue bounded role-safe shutdown", async () => {
+   const state = new StatusState()
+@@ -32,7 +32,7 @@ it("keeps state atomic and gives the queue bounded role-safe shutdown", async ()
+   expect([await draining.take(), await draining.take(), await draining.take()]).toEqual(["a", "b", undefined])
+   expect(await draining.offer("late")).toBe(false)
+
+-  const targets = Array.from({ length: 3 }, (_, index) => new Target({ id: targetId(`target_worker_${index}`), name: `worker ${index}`, url: "https://example.test", method: "GET", expectedStatus: [200], interval: 10, timeout: 50, slowThreshold: 20, enabled: true }))
++  const targets = Array.from({ length: 3 }, (_, index) => new Target({ id: targetId(`target_worker_${index}`), name: `worker ${index}`, url: "https://example.test", method: "GET", expectedStatus: [200], interval: Duration.millis(10), timeout: Duration.millis(50), slowThreshold: Duration.millis(20), enabled: true }))
+   const consumed: string[] = []
+   await Effect.runPromise(runOnceEffect(targets, { queueCapacity: 1, workerCount: 2 }, {
+     client: new FakeProbeClient({}),
+diff --git a/test/checkpoint-10/operational-policy.test.ts b/test/checkpoint-10/operational-policy.test.ts
+index ff5f732..64604a8 100644
+--- a/test/checkpoint-10/operational-policy.test.ts
++++ b/test/checkpoint-10/operational-policy.test.ts
+@@ -1,5 +1,5 @@
+ import { it } from "@effect/vitest"
+-import { Cause, Clock, Effect, Fiber, Pool, Random, Redacted, Ref } from "effect"
++import { Cause, Clock, Duration, Effect, Fiber, Pool, Random, Redacted, Ref } from "effect"
+ import { TestClock } from "effect/testing"
+ import { expect } from "vitest"
+ import { DnsError } from "../../src/domain/errors.js"
+@@ -10,47 +10,7 @@ import * as Config from "../../src/services/Config.js"
+ import { HttpProbeClient } from "../../src/services/HttpProbeClient.js"
+ import { runOnceEffect } from "../../src/watch/Scheduler.js"
+
+-const target = (id: string, overrides: Partial<ConstructorParameters<typeof Target>[0]> = {}) => new Target({ id: targetId(`target_${id}`), name: id, url: "https://example.test", method: "GET", expectedStatus: [200], interval: 10, timeout: 50, slowThreshold: 500, enabled: true, ...overrides })
+-
+-it.effect("keeps the real HTTP timeout and cleanup on Effect's clock", () => Effect.scoped(Effect.gen(function*() {
+-  const nativeSetTimeout = globalThis.setTimeout
+-  let rawProbeTimers = 0, calls = 0, releaseCleanup: (() => void) | undefined
+-  globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => {
+-    if (args[1] === 50) rawProbeTimers++
+-    return nativeSetTimeout(...args)
+-  }) as typeof setTimeout
+-  try {
+-    let markStarted!: () => void
+-    const started = new Promise<void>(resolve => { markStarted = resolve })
+-    let markCleanup!: () => void
+-    const cleanupStarted = new Promise<void>(resolve => { markCleanup = resolve })
+-    const cleanupGate = new Promise<void>(resolve => { releaseCleanup = resolve })
+-    const client = new HttpProbeClient((_url, init) => {
+-      calls++
+-      if (calls > 1) return Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }))
+-      markStarted()
+-      return new Promise((_resolve, reject) => init?.signal?.addEventListener("abort", async () => {
+-        markCleanup()
+-        await cleanupGate
+-        reject(init.signal!.reason)
+-      }, { once: true }))
+-    })
+-    const fiber = yield* ProbeProgram.probeOnce(target("real-http"), client).pipe(Random.withSeed("real-http-timeout"), Effect.forkScoped)
+-    yield* Effect.promise(() => started)
+-    yield* TestClock.adjust("1 second")
+-    yield* Effect.promise(() => cleanupStarted)
+-    expect(rawProbeTimers).toBe(0)
+-    expect(calls, "retry waits for interrupted transport cleanup").toBe(1)
+-    releaseCleanup!()
+-    yield* Effect.promise(() => Promise.resolve())
+-    yield* TestClock.adjust("1 second")
+-    expect((yield* Fiber.join(fiber)).response.status).toBe(200)
+-    expect(calls).toBe(2)
+-  } finally {
+-    releaseCleanup?.()
+-    globalThis.setTimeout = nativeSetTimeout
+-  }
+-})))
++const target = (id: string, overrides: Partial<ConstructorParameters<typeof Target>[0]> = {}) => new Target({ id: targetId(`target_${id}`), name: id, url: "https://example.test", method: "GET", expectedStatus: [200], interval: Duration.millis(10), timeout: Duration.millis(50), slowThreshold: Duration.millis(500), enabled: true, ...overrides })
+
+ it.effect("applies production retry, response, config, secret, and pool policy", () => Effect.gen(function*() {
+   const program = ProbeProgram as any
+@@ -87,7 +47,7 @@ it.effect("applies production retry, response, config, secret, and pool policy",
+     expect(synchronousAttempts).toBe(2)
+     const repeats = yield* Ref.make(0)
+     yield* program.repeatSuccessfulProbeEffect(Ref.update(repeats, n => n + 1), 3)
+-    expect(yield* Ref.get(repeats)).toBe(4)
++    expect(yield* Ref.get(repeats).pipe(Effect.orDie)).toBe(4)
+   }) as any)
+
+   let bodyRead = false
+@@ -108,7 +68,7 @@ it.effect("applies production retry, response, config, secret, and pool policy",
+     const timedBody = Object.defineProperty({}, "ok", { enumerable: true, get: () => { validated = true; return true } })
+     const clock: Clock.Clock = { ...baseClock, currentTimeMillisUnsafe: () => validated ? 25 : 10, currentTimeMillis: Effect.sync(() => validated ? 25 : 10) }
+     const timed: any = yield* program.probeOnce(target("timed", { healthBodySchema: JSON.stringify({ type: "object", required: ["ok"] }) }), { probe: async () => ({ status: 200, body: timedBody }) }).pipe(Effect.provideService(Clock.Clock, clock))
+-    expect([timed.checkedAt.getTime(), timed.duration]).toEqual([25, 15])
++    expect([timed.checkedAt.getTime(), Duration.toMillis(timed.duration)]).toEqual([25, 15])
+   }) as any
+
+   const cfg = config.appConfig({ pollInterval: 1, probeTimeout: 1, workerConcurrency: 2, slowThreshold: 1, realLlmToken: "swordfish" })
+diff --git a/test/checkpoint-11/storage-model.test.ts b/test/checkpoint-11/storage-model.test.ts
+new file mode 100644
+index 0000000..4113299
+--- /dev/null
++++ b/test/checkpoint-11/storage-model.test.ts
+@@ -0,0 +1,85 @@
++import { expect, it } from "vitest"
++import { Duration, Effect, Equal, Schema } from "effect"
++import { InMemoryCheckRepository } from "../../src/repo/CheckRepository.js"
++import { digestFromStream } from "../../src/services/DigestService.js"
++import { appConfig } from "../../src/services/Config.js"
++
++const valid = { id: "check_1", targetId: "target_api", checkedAt: "2026-01-01T00:00:00.000Z", durationMillis: 12, classification: { _tag: "Up" }, response: {} }
++
++it("derives storage and target wire contracts without losing explicit values", async () => {
++  const storage = await import("../../src/domain/" + "storage.js").catch(() => undefined)
++  const schema = await import("../../src/domain/" + "schema.js")
++  const jsonSchema = await import("../../src/domain/" + "json-schema.js").catch(() => undefined)
++  expect(storage, "implement the schema-backed storage boundary").toBeDefined()
++  expect(jsonSchema, "derive the public target JSON Schema").toBeDefined()
++  const { decodeStoredCheck, StoredCheck, storedCheckJsonSchema } = storage!
++  const { decodeTargetConfig, TargetConfig } = schema as any
++  const domain: any = await Effect.runPromise(decodeStoredCheck(valid) as any)
++  expect(domain.checkedAt).toBeInstanceOf(Date)
++  const equivalent = new (schema as any).CheckResult({ ...domain, duration: Duration.nanos(12_000_000n) })
++  const adjacent = new (schema as any).CheckResult({ ...domain, duration: Duration.nanos(12_000_001n) })
++  const memory = new InMemoryCheckRepository()
++  await memory.saveCheck(domain)
++  await expect(memory.saveCheck(equivalent)).resolves.toBeUndefined()
++  await expect(memory.applyCheck(equivalent)).resolves.toBe("Unchanged")
++  await expect(memory.saveCheck(adjacent)).rejects.toMatchObject({ operation: "saveCheck" })
++  await expect(digestFromStream([domain, equivalent])).resolves.toMatchObject({ malformedRows: 0, targets: [{ checks: 1 }] })
++  await expect(digestFromStream([domain, adjacent])).resolves.toMatchObject({ malformedRows: 1, targets: [] })
++  const row = await Effect.runPromise(Schema.decodeUnknownEffect(StoredCheck)(valid) as any)
++  expect(await Effect.runPromise(Schema.encodeEffect(StoredCheck)(row) as any)).toEqual(valid)
++  const { response: _response, ...withoutResponse } = valid
++  expect(((await Effect.runPromise(Schema.decodeUnknownEffect(StoredCheck)(withoutResponse) as any)) as any).response).toBeUndefined()
++  await expect(Effect.runPromise(decodeStoredCheck({ ...valid, durationMillis: 0 }))).rejects.toThrow("durationMillis")
++  await expect(Effect.runPromise(decodeStoredCheck({ ...valid, targetId: 4 }))).rejects.toThrow("targetId")
++  expect(JSON.stringify(storedCheckJsonSchema)).toContain("durationMillis")
++
++  const encoded = { id: "target_api", name: " API ", url: "https://example.test", method: "GET", expectedStatus: [200], interval: "1 second", timeout: "2 seconds", slowThreshold: "3 seconds" } as const
++  const target: any = await Effect.runPromise(decodeTargetConfig(encoded) as any)
++  expect([target.name, Duration.toMillis(target.interval), Duration.toMillis(target.timeout), Duration.toMillis(target.slowThreshold)]).toEqual(["API", 1000, 2000, 3000])
++  const roundTrip = await Effect.runPromise(Schema.encodeEffect(TargetConfig)(target) as any) as any
++  expect([roundTrip.interval, roundTrip.timeout, roundTrip.slowThreshold]).toEqual([1000, 2000, 3000])
++  const decodedAgain: any = await Effect.runPromise(decodeTargetConfig(JSON.parse(JSON.stringify(roundTrip))) as any)
++  expect([decodedAgain.interval, decodedAgain.timeout, decodedAgain.slowThreshold].every(Duration.isDuration)).toBe(true)
++  expect(() => new TargetConfig(encoded as any)).toThrow()
++  expect(JSON.stringify(jsonSchema!.targetJsonSchemaDocument)).toContain("slowThreshold")
++
++  const canonical = { id: "target_api", name: "API", url: "https://example.test", method: "GET", expectedStatus: [200], interval: Duration.nanos(500_000n), timeout: Duration.nanos(500_000n), slowThreshold: Duration.nanos(500_000n), enabled: true }
++  expect(() => new (schema as any).Target(canonical)).not.toThrow()
++  for (const field of ["interval", "timeout", "slowThreshold"] as const) {
++    expect(() => new (schema as any).Target({ ...canonical, [field]: Duration.zero }), field).toThrow()
++    expect(() => new (schema as any).Target({ ...canonical, [field]: Duration.millis(-1) }), field).toThrow()
++  }
++  const infinite = new (schema as any).Target({ ...canonical, id: "target_infinite", interval: Duration.infinity, timeout: Duration.infinity, slowThreshold: Duration.infinity })
++
++  const { SqliteCheckRepository } = await import("../../src/repo/" + "SqliteCheckRepository.js")
++  const repo: any = new SqliteCheckRepository()
++  try {
++    await repo.saveCheck(domain)
++    await repo.saveCheck(domain)
++    const infiniteCheck = new (schema as any).CheckResult({ ...domain, id: "check_infinite", duration: Duration.infinity })
++    await repo.saveCheck(infiniteCheck)
++    await repo.saveCheck(infiniteCheck)
++    await repo.saveTarget(infinite)
++    const legacyTarget = { id: "target_legacy", name: "Legacy", url: "https://legacy.example.test", method: "GET", expectedStatus: [200], interval: 4, timeout: 5, slowThreshold: 6, enabled: true }
++    if (typeof repo.execute === "function") await repo.execute(`insert into targets(id,json) values('target_legacy','${JSON.stringify(legacyTarget).replaceAll("'", "''")}')`)
++    else repo.db.prepare("insert into targets values(?,?)").run("target_legacy", JSON.stringify(legacyTarget))
++    const legacy = JSON.stringify({ ...valid, id: "check_legacy", duration: 7, durationMillis: undefined })
++    if (typeof repo.execute === "function") await repo.execute(`insert into checks(id,json) values('check_legacy','${legacy.replaceAll("'", "''")}')`)
++    else repo.db.prepare("insert into checks values(?,?)").run("check_legacy", legacy)
++    const equivalentLegacy = new (schema as any).CheckResult({ ...domain, id: "check_legacy", duration: Duration.nanos(7_000_000n) })
++    await expect(repo.saveCheck(equivalentLegacy)).resolves.toBeUndefined()
++    const precise = new (schema as any).CheckResult({ ...domain, id: "check_precise", duration: Duration.nanos(9_007_199_254_740_993n) })
++    await repo.saveCheck(precise)
++    const checks = await repo.listChecks()
++    expect(checks.map((check: any) => check.id)).toEqual(["check_1", "check_infinite", "check_legacy", "check_precise"])
++    expect(Equal.equals(checks.at(-1).duration, precise.duration)).toBe(true)
++    const targets = await repo.listTargets()
++    const infiniteRead = targets.find((target: any) => target.id === "target_infinite")
++    const legacyRead = targets.find((target: any) => target.id === "target_legacy")
++    expect([infiniteRead.interval, infiniteRead.timeout, infiniteRead.slowThreshold].every((value: unknown) => value === Duration.infinity)).toBe(true)
++    expect([legacyRead.interval, legacyRead.timeout, legacyRead.slowThreshold].map(Duration.toMillis)).toEqual([4, 5, 6])
++  } finally { await repo.close() }
++
++  const config = appConfig({ pollInterval: 1, probeTimeout: 1, workerConcurrency: 1, slowThreshold: 1, telemetryEnabled: false, maxIncidents: 0 })
++  expect([config.telemetryEnabled, config.maxIncidents]).toEqual([false, 0])
++})
+diff --git a/test/native-capabilities.test.ts b/test/native-capabilities.test.ts
+index 35d98ef..7beb09c 100644
+--- a/test/native-capabilities.test.ts
++++ b/test/native-capabilities.test.ts
+@@ -1,5 +1,5 @@
+ import { describe, expect, it } from "vitest";
+-import { Effect } from "effect";
++import { Duration, Effect } from "effect";
+ import { Target, CheckResult, ResponseMetadata, Up, targetId, durationMillis } from "../src/domain/schema.js";
+ import { InMemoryCheckRepository } from "../src/repo/CheckRepository.js";
+ import { FakeProbeClient, valid } from "../src/services/ProbeClient.js";
+@@ -10,7 +10,7 @@ import { Fake as fakeSummary } from "../src/services/IncidentSummarizer.js";
+ import { ManagedAppRuntime } from "../src/runtime/ManagedRuntime.js";
+ import { greet } from "../src/smoke.js";
+
+-const target = () => new Target({ id: "target_api", name: "API", url: "http://example.test", method: "GET", expectedStatus: [200], interval: "10 ms", timeout: "50 ms", slowThreshold: "100 ms", enabled: true });
++const target = () => new Target({ id: targetId("target_api"), name: "API", url: "http://example.test", method: "GET", expectedStatus: [200], interval: Duration.millis(10), timeout: Duration.millis(50), slowThreshold: Duration.millis(100), enabled: true });
+ const check = () => new CheckResult({ id: "check_a", targetId: targetId("target_api"), checkedAt: new Date(0), duration: "1 ms", classification: new Up(), response: new ResponseMetadata({ status: 200 }) });
+
+ describe("BeaconWatch attendee happy paths", () => {

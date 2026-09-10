@@ -1,0 +1,23 @@
+{
+  "name": "beaconwatch",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "BeaconWatch — the carried example app for the Effect TS 4.x workshop. A self-contained uptime/endpoint monitor (POC).",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@effect/platform-node": "4.0.0-rc.112",
+    "@effect/sql-sqlite-node": "4.0.0-rc.112",
+    "ajv": "8.20.0",
+    "effect": "4.0.0-rc.112"
+  },
+  "devDependencies": {
+    "@effect/vitest": "4.0.0-rc.112",
+    "typescript": "5.9.3",
+    "vitest": "4.1.0"
+  }
+}

@@ -1,0 +1,418 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BeaconWatch Curriculum <curriculum@local.invalid>
+Date: Tue, 8 Sep 2026 18:21:33 -0400
+Subject: [PATCH 06/17] Inject history filesystem capabilities
+
+Amp-Thread-ID: https://ampcode.com/threads/T-01a07e63-e568-722f-8fe5-2c9ecc4d8907
+---
+ package-lock.json                       | 195 +++++++++++++++++++++++-
+ package.json                            |  15 +-
+ src/services/DigestService.ts           |  34 +++--
+ test/checkpoint-05/service-seam.test.ts |  24 +++
+ 4 files changed, 249 insertions(+), 19 deletions(-)
+ create mode 100644 test/checkpoint-05/service-seam.test.ts
+
+diff --git a/package-lock.json b/package-lock.json
+index 2afdb75..5ce291f 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -8,6 +8,7 @@
+       "name": "beaconwatch",
+       "version": "0.1.0",
+       "dependencies": {
++        "@effect/platform-node": "4.0.0-rc.112",
+         "ajv": "8.20.0",
+         "effect": "4.0.0-rc.112"
+       },
+@@ -18,6 +19,40 @@
+         "vitest": "4.1.0"
+       }
+     },
++    "node_modules/@effect/platform-node": {
++      "version": "4.0.0-rc.112",
++      "resolved": "https://registry.npmjs.org/@effect/platform-node/-/platform-node-4.0.0-rc.112.tgz",
++      "integrity": "sha512-/BMAcdNGQQskLmI0Zoa95KfTZkr9HV9N4NSxaSrusG6GeW6Ulp9KvZ+Rlaiw8lnOt43CXjFLdfll5/k5rxL4hQ==",
++      "license": "MIT",
++      "dependencies": {
++        "@effect/platform-node-shared": "^4.0.0-rc.112",
++        "mime": "^4.1.0",
++        "undici": "^8.10.0"
++      },
++      "engines": {
++        "node": ">=18.0.0"
++      },
++      "peerDependencies": {
++        "effect": "^4.0.0-rc.112",
++        "redis": ">=5.0.0 <7.0.0"
++      }
++    },
++    "node_modules/@effect/platform-node-shared": {
++      "version": "4.0.0-rc.112",
++      "resolved": "https://registry.npmjs.org/@effect/platform-node-shared/-/platform-node-shared-4.0.0-rc.112.tgz",
++      "integrity": "sha512-ttjz0xKamFN7vL8pNDYVwddJLjZvqKePc05djlz2VcdaKbLsnYbtMnL1rbOfHgEnIUSHGh7FkjaN4DM1Ov81sQ==",
++      "license": "MIT",
++      "dependencies": {
++        "@types/ws": "^8.18.1",
++        "ws": "^8.21.3"
++      },
++      "engines": {
++        "node": ">=18.0.0"
++      },
++      "peerDependencies": {
++        "effect": "^4.0.0-rc.112"
++      }
++    },
+     "node_modules/@effect/vitest": {
+       "version": "4.0.0-rc.112",
+       "resolved": "https://registry.npmjs.org/@effect/vitest/-/vitest-4.0.0-rc.112.tgz",
+@@ -124,6 +159,83 @@
+         "url": "https://github.com/sponsors/oxc-project"
+       }
+     },
++    "node_modules/@redis/bloom": {
++      "version": "6.2.1",
++      "resolved": "https://registry.npmjs.org/@redis/bloom/-/bloom-6.2.1.tgz",
++      "integrity": "sha512-huQgNLaCIZfQ9SeLn4q9124uOUd8HbZDYHwwUzNcRgHqCHiHKl2dDxMqJCeWh8cMqZAoWuHR8XnWbDMIf+o7ag==",
++      "license": "MIT",
++      "peer": true,
++      "engines": {
++        "node": ">= 20.0.0"
++      },
++      "peerDependencies": {
++        "@redis/client": "^6.2.1"
++      }
++    },
++    "node_modules/@redis/client": {
++      "version": "6.2.1",
++      "resolved": "https://registry.npmjs.org/@redis/client/-/client-6.2.1.tgz",
++      "integrity": "sha512-LzxBY7SIBvvJiyCgcaJZZakE3fJrZZ++i24+EDW9fKpCl68D35uJcKFpZZwCfOoG9WZTbyZlMzMeM0gtOAMU9Q==",
++      "license": "MIT",
++      "peer": true,
++      "dependencies": {
++        "cluster-key-slot": "1.1.2"
++      },
++      "engines": {
++        "node": ">= 20.0.0"
++      },
++      "peerDependencies": {
++        "@node-rs/xxhash": "^1.1.0",
++        "@opentelemetry/api": ">=1 <2"
++      },
++      "peerDependenciesMeta": {
++        "@node-rs/xxhash": {
++          "optional": true
++        },
++        "@opentelemetry/api": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/@redis/json": {
++      "version": "6.2.1",
++      "resolved": "https://registry.npmjs.org/@redis/json/-/json-6.2.1.tgz",
++      "integrity": "sha512-AFIUJ8Gj0DaaSBHYuSt8+O0oYWM+50OK1c0OmodB7XERIA8+BbyV3O4v76f9iccWasd1/7qjfZTpuzexUaZtrQ==",
++      "license": "MIT",
++      "peer": true,
++      "engines": {
++        "node": ">= 20.0.0"
++      },
++      "peerDependencies": {
++        "@redis/client": "^6.2.1"
++      }
++    },
++    "node_modules/@redis/search": {
++      "version": "6.2.1",
++      "resolved": "https://registry.npmjs.org/@redis/search/-/search-6.2.1.tgz",
++      "integrity": "sha512-2vfOAOyYFE7UUw3sBBlkqqruBtOUS4HRY5MtW4hp83llrwvtrTE4r22CEqXddlV+54zkLxBE4nmsIJ/dpezQrQ==",
++      "license": "MIT",
++      "peer": true,
++      "engines": {
++        "node": ">= 20.0.0"
++      },
++      "peerDependencies": {
++        "@redis/client": "^6.2.1"
++      }
++    },
++    "node_modules/@redis/time-series": {
++      "version": "6.2.1",
++      "resolved": "https://registry.npmjs.org/@redis/time-series/-/time-series-6.2.1.tgz",
++      "integrity": "sha512-kiYniph04dJOole+L359B6C9E+jYS2uDP7hca6Onj0xF38ZIpyxARO0Iq0W4ZRn1e8Q6vqW00QFZVSMRA/2Ijw==",
++      "license": "MIT",
++      "peer": true,
++      "engines": {
++        "node": ">= 20.0.0"
++      },
++      "peerDependencies": {
++        "@redis/client": "^6.2.1"
++      }
++    },
+     "node_modules/@rolldown/binding-android-arm-eabi": {
+       "version": "1.2.7",
+       "resolved": "https://registry.npmjs.org/@rolldown/binding-android-arm-eabi/-/binding-android-arm-eabi-1.2.7.tgz",
+@@ -440,12 +552,20 @@
+       "version": "22.18.1",
+       "resolved": "https://registry.npmjs.org/@types/node/-/node-22.18.1.tgz",
+       "integrity": "sha512-rzSDyhn4cYznVG+PCzGe1lwuMYJrcBS1fc3JqSa2PvtABwWo+dZ1ij5OVok3tqfpEBCBoaR4d7upFJk73HRJDw==",
+-      "dev": true,
+       "license": "MIT",
+       "dependencies": {
+         "undici-types": "~6.21.0"
+       }
+     },
++    "node_modules/@types/ws": {
++      "version": "8.18.1",
++      "resolved": "https://registry.npmjs.org/@types/ws/-/ws-8.18.1.tgz",
++      "integrity": "sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg==",
++      "license": "MIT",
++      "dependencies": {
++        "@types/node": "*"
++      }
++    },
+     "node_modules/@vitest/expect": {
+       "version": "4.1.0",
+       "resolved": "https://registry.npmjs.org/@vitest/expect/-/expect-4.1.0.tgz",
+@@ -595,6 +715,16 @@
+         "node": ">=18"
+       }
+     },
++    "node_modules/cluster-key-slot": {
++      "version": "1.1.2",
++      "resolved": "https://registry.npmjs.org/cluster-key-slot/-/cluster-key-slot-1.1.2.tgz",
++      "integrity": "sha512-RMr0FhtfXemyinomL4hrWcYJxmX6deFdCxpJzhDttxgO1+bcCnkk+9drydLVDmAMG7NE6aN/fl4F7ucU/90gAA==",
++      "license": "Apache-2.0",
++      "peer": true,
++      "engines": {
++        "node": ">=0.10.0"
++      }
++    },
+     "node_modules/convert-source-map": {
+       "version": "2.0.0",
+       "resolved": "https://registry.npmjs.org/convert-source-map/-/convert-source-map-2.0.0.tgz",
+@@ -1015,6 +1145,21 @@
+         "@jridgewell/sourcemap-codec": "^1.5.5"
+       }
+     },
++    "node_modules/mime": {
++      "version": "4.1.0",
++      "resolved": "https://registry.npmjs.org/mime/-/mime-4.1.0.tgz",
++      "integrity": "sha512-X5ju04+cAzsojXKes0B/S4tcYtFAJ6tTMuSPBEn9CPGlrWr8Fiw7qYeLT0XyH80HSoAoqWCaz+MWKh22P7G1cw==",
++      "funding": [
++        "https://github.com/sponsors/broofa"
++      ],
++      "license": "MIT",
++      "bin": {
++        "mime": "bin/cli.js"
++      },
++      "engines": {
++        "node": ">=16"
++      }
++    },
+     "node_modules/msgpackr": {
+       "version": "2.1.0",
+       "resolved": "https://registry.npmjs.org/msgpackr/-/msgpackr-2.1.0.tgz",
+@@ -1166,6 +1311,23 @@
+       ],
+       "license": "MIT"
+     },
++    "node_modules/redis": {
++      "version": "6.2.1",
++      "resolved": "https://registry.npmjs.org/redis/-/redis-6.2.1.tgz",
++      "integrity": "sha512-Z9VHtgYs48PiQC77X9O2Er8Hj4T+5BtFjT91/vi5Is1D04N72cA946ZslM1ImJw8ZctFBZWAVjM7S5wJNeHMpg==",
++      "license": "MIT",
++      "peer": true,
++      "dependencies": {
++        "@redis/bloom": "6.2.1",
++        "@redis/client": "6.2.1",
++        "@redis/json": "6.2.1",
++        "@redis/search": "6.2.1",
++        "@redis/time-series": "6.2.1"
++      },
++      "engines": {
++        "node": ">= 20.0.0"
++      }
++    },
+     "node_modules/require-from-string": {
+       "version": "2.0.2",
+       "resolved": "https://registry.npmjs.org/require-from-string/-/require-from-string-2.0.2.tgz",
+@@ -1298,11 +1460,19 @@
+         "node": ">=14.17"
+       }
+     },
++    "node_modules/undici": {
++      "version": "8.10.2",
++      "resolved": "https://registry.npmjs.org/undici/-/undici-8.10.2.tgz",
++      "integrity": "sha512-/y4/bH9YNU5hi9NIrpOuvGXFcxrj3CMrV+/AYpowAYTpHn8gX/XPFjNy766FPoYY0miQhdW977JFWKGNhBdwyQ==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=22.19.0"
++      }
++    },
+     "node_modules/undici-types": {
+       "version": "6.21.0",
+       "resolved": "https://registry.npmjs.org/undici-types/-/undici-types-6.21.0.tgz",
+       "integrity": "sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==",
+-      "dev": true,
+       "license": "MIT"
+     },
+     "node_modules/vite": {
+@@ -1481,6 +1651,27 @@
+       "engines": {
+         "node": ">=8"
+       }
++    },
++    "node_modules/ws": {
++      "version": "8.21.3",
++      "resolved": "https://registry.npmjs.org/ws/-/ws-8.21.3.tgz",
++      "integrity": "sha512-201TZ/kPWxoPr/OKWjquZR1SWKXcvxdH+e1xrx89b3YbmzLMFCLfnaG1HFIgWzJOEWZ7MvpK++odZufgYR50Rw==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=10.0.0"
++      },
++      "peerDependencies": {
++        "bufferutil": "^4.0.1",
++        "utf-8-validate": ">=5.0.2"
++      },
++      "peerDependenciesMeta": {
++        "bufferutil": {
++          "optional": true
++        },
++        "utf-8-validate": {
++          "optional": true
++        }
++      }
+     }
+   }
+ }
+diff --git a/package.json b/package.json
+index 61e20b7..dc49543 100644
+--- a/package.json
++++ b/package.json
+@@ -10,12 +10,17 @@
+     "test:watch": "vitest",
+     "smoke": "vitest run test/native-capabilities.test.ts test/native-cli.test.ts -t 'retains the command smoke path'",
+     "checkpoint:00": "npm run typecheck && vitest run test/checkpoint-00 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke",
+-    "checkpoint:01": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
+-    ,"checkpoint:02": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke",
+-    "checkpoint:03": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
+-    ,"checkpoint:04": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
++    "checkpoint:01": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke",
++    "checkpoint:02": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke",
++    "checkpoint:03": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke",
++    "checkpoint:04": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke",
++    "checkpoint:05": "npm run typecheck && vitest run test/checkpoint-00 test/checkpoint-01 test/checkpoint-02 test/checkpoint-03 test/checkpoint-04 test/checkpoint-05 test/native-capabilities.test.ts test/native-cli.test.ts && npm run smoke"
++  },
++  "dependencies": {
++    "@effect/platform-node": "4.0.0-rc.112",
++    "ajv": "8.20.0",
++    "effect": "4.0.0-rc.112"
+   },
+-  "dependencies": { "ajv": "8.20.0", "effect": "4.0.0-rc.112" },
+   "devDependencies": {
+     "@effect/vitest": "4.0.0-rc.112",
+     "@types/node": "22.18.1",
+diff --git a/src/services/DigestService.ts b/src/services/DigestService.ts
+index 729d555..652061a 100644
+--- a/src/services/DigestService.ts
++++ b/src/services/DigestService.ts
+@@ -1,4 +1,6 @@
+-import { readFile } from "node:fs/promises";
++import { Effect, FileSystem, Layer, Path } from "effect";
++import * as NodeFileSystem from "@effect/platform-node/NodeFileSystem";
++import * as NodePath from "@effect/platform-node/NodePath";
+ import { HistoryReadError } from "../domain/errors.js";
+ import {
+   CheckFailure,
+@@ -112,14 +114,14 @@ export async function digestFromStream(
+     );
+   return { targets, incidents: [], malformedRows, processedRows };
+ }
+-export const importHistory = async (path: string) => {
+-  let text: string;
+-  try {
+-    text = await readFile(path, "utf8");
+-  } catch (e) {
+-    throw new HistoryReadError({ path, cause: e });
+-  }
+-  const rows = await Promise.all(
++export const importHistory = (path: string) => Effect.gen(function*() {
++  const files = yield* FileSystem.FileSystem;
++  const paths = yield* Path.Path;
++  const resolved = paths.resolve(path);
++  const text = yield* files.readFileString(resolved).pipe(
++    Effect.mapError((cause) => new HistoryReadError({ path, cause })),
++  );
++  const rows = yield* Effect.promise(() => Promise.all(
+     text
+       .split(/\r?\n/)
+       .filter((x) => x.trim())
+@@ -130,9 +132,17 @@ export const importHistory = async (path: string) => {
+           return e as MalformedHistoryRow;
+         }
+       }),
+-  );
+-  return digestFromStream(rows);
+-};
++  ));
++  return yield* Effect.tryPromise({
++    try: () => digestFromStream(rows),
++    catch: (cause) => cause,
++  });
++});
++
++export const HistoryPlatformLive = Layer.merge(
++  NodeFileSystem.layer,
++  NodePath.layer,
++);
+ 
+ export const orderedDigestRows = async <A>(rows: readonly A[], inspect: (row: A) => Promise<A>) =>
+   {
+diff --git a/src/cli/cli.ts b/src/cli/cli.ts
+--- a/src/cli/cli.ts
++++ b/src/cli/cli.ts
+@@ -1,4 +1,5 @@
+-import { importHistory } from "../services/DigestService.js";
++import { Effect } from "effect";
++import { HistoryPlatformLive, importHistory } from "../services/DigestService.js";
+
+ export async function runCli(argv: readonly string[]) {
+   const [command, arg] = argv;
+@@ -6,7 +7,8 @@
+   if (command === "demo") return "demo";
+   if (command === "check" && arg) return `checked ${arg}`;
+   if (command === "serve") return "serve";
+-  if (command === "import-history" && arg) return importHistory(arg);
++  if (command === "import-history" && arg)
++    return Effect.runPromise(importHistory(arg).pipe(Effect.provide(HistoryPlatformLive)));
+   if (command === "digest") return "digest";
+   throw new TypeError("usage: beaconwatch [demo|check <config>|serve|import-history <file>|digest]");
+ }
+diff --git a/test/checkpoint-05/service-seam.test.ts b/test/checkpoint-05/service-seam.test.ts
+new file mode 100644
+index 0000000..b139cef
+--- /dev/null
++++ b/test/checkpoint-05/service-seam.test.ts
+@@ -0,0 +1,24 @@
++import { describe, expect, it } from "vitest";
++import { Effect, FileSystem, Layer, Path } from "effect";
++import { HistoryPlatformLive, importHistory } from "../../src/services/DigestService.js";
++
++const fixture = JSON.stringify({ id: "check_fake", targetId: "target_fake", checkedAt: "2026-01-01T00:00:00.000Z", durationMillis: 12, classification: { _tag: "Up" }, response: { status: 200 } });
++
++describe("history file capability", () => {
++  it("imports fake rows without touching the live filesystem", async () => {
++    let reads = 0;
++    const files = FileSystem.makeNoop({ readFileString: () => Effect.sync(() => { reads++; return fixture; }) });
++    const digest = await Effect.runPromise(importHistory("virtual/history.ndjson").pipe(
++      Effect.provide(Layer.succeed(FileSystem.FileSystem)(files)),
++      Effect.provide(Path.layer),
++    ));
++    expect(digest.targets.map((target) => target.targetId)).toEqual(["target_fake"]);
++    expect(digest.processedRows).toBe(1);
++    expect(reads).toBe(1);
++  });
++
++  it("keeps the existing fixture compatible with the Node layer", async () => {
++    const digest = await Effect.runPromise(importHistory("test/fixtures/check-history.ndjson").pipe(Effect.provide(HistoryPlatformLive)));
++    expect(digest.processedRows).toBeGreaterThan(0);
++  });
++});
