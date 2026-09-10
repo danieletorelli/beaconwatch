@@ -1,3 +1,4 @@
+import { Equal, Option, Result } from "effect";
 import {
   InvalidBody,
   TimeoutError,
@@ -30,52 +31,49 @@ export const makeCheckResult = (x: {
   duration: number;
   classification: Classification;
 }) => new ImmutableCheckResult(x.id, x.targetId, x.duration, x.classification);
-export const incidentCloseTime = (i: { closedAt?: Date }) => i.closedAt;
-export const sameIncident = (a: object, b: object) => a === b;
+export const incidentCloseTime = (i: { closedAt: Option.Option<Date> }): Option.Option<Date> =>
+  i.closedAt;
+export const sameIncident = (a: object, b: object) => Equal.equals(a, b)
 export const renameCheck = (check: { id: string }, id: string) => {
   check.id = id;
   return check;
 };
 export const formatIncidentWindow = (
-  i: { openedAt: Date; closedAt?: Date },
+  i: { openedAt: Date; closedAt: Option.Option<Date> },
   timeZone: string,
 ) =>
-  `${i.openedAt.toLocaleString("sv-SE", { timeZone })} – ${i.closedAt ? i.closedAt.toLocaleString("sv-SE", { timeZone }) : "open"}`;
-export type Result<A, E> = { ok: true; value: A } | { ok: false; error: E };
+  `${i.openedAt.toLocaleString("sv-SE", { timeZone })} – ${Option.isSome(i.closedAt) ? i.closedAt.value.toLocaleString("sv-SE", { timeZone }) : "open"}`;
+export type { Result } from "effect";
 export const classifyProbe = (i: {
   target: TargetConfig;
   status?: number;
   duration: number;
   bodyValid?: boolean;
   failure?: DomainError;
-}): Result<Classification, DomainError> => {
+}): Result.Result<Classification, DomainError> => {
   if (i.failure) {
     const d = classifyDomainError(i.failure);
-    if (d === "operator-action") throw i.failure;
-    return { ok: true, value: d === "ignore-disabled" ? new Unknown() : d === "invalid-response" ? new InvalidResponse() : new Down() };
+    if (d === "operator-action") return Result.fail(i.failure);
+    return Result.succeed(d === "ignore-disabled" ? new Unknown() : d === "invalid-response" ? new InvalidResponse() : new Down());
   }
   if (i.status === undefined)
-    return {
-      ok: false,
-      error: new TimeoutError({ timeout: String(i.target.timeout) }),
-    };
+    return Result.fail(
+      new TimeoutError({ timeout: String(i.target.timeout) }),
+    );
   if (!i.target.expectedStatus.includes(i.status))
-    return {
-      ok: false,
-      error: new UnexpectedStatus({
+    return Result.fail(
+      new UnexpectedStatus({
         expected: i.target.expectedStatus,
         actual: i.status,
       }),
-    };
+    );
   if (i.bodyValid === false)
-    return {
-      ok: false,
-      error: new InvalidBody({
+    return Result.fail(
+      new InvalidBody({
         reason: "body did not match configured schema",
       }),
-    };
-  return {
-    ok: true,
-    value: i.duration > i.target.slowThreshold ? new Slow() : new Up(),
-  };
+    );
+  return Result.succeed(
+    i.duration > i.target.slowThreshold ? new Slow() : new Up(),
+  );
 };

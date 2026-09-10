@@ -1,3 +1,6 @@
+import { Effect, Option, Schema } from "effect";
+import { ValidationError } from "./errors.js";
+
 export type TargetId = string & { readonly __brand: "TargetId" };
 export type DurationInput = number | string;
 
@@ -7,7 +10,7 @@ export const durationMillis = (input: DurationInput): number => {
     /^\s*(-?\d+(?:\.\d+)?)\s*(ms|millis(?:econds?)?|seconds?|minutes?|hours?|nanos?)?\s*$/i.exec(
       input,
     );
-  if (!match) throw new TypeError("invalid duration");
+  if (!match) throw new ValidationError({ field: "duration", reason: "invalid duration" });
   const n = Number(match[1]);
   const unit = (match[2] ?? "ms").toLowerCase();
   if (unit.startsWith("nano")) return n / 1_000_000;
@@ -19,7 +22,7 @@ export const durationMillis = (input: DurationInput): number => {
 
 export const targetId = (value: unknown): TargetId => {
   if (typeof value !== "string" || !/^target_[a-z0-9][a-z0-9_-]*$/.test(value))
-    throw new TypeError("invalid target id");
+    throw new ValidationError({ field: "targetId", reason: "invalid target id" });
   return value as TargetId;
 };
 export type HttpMethod = "GET" | "POST" | "HEAD";
@@ -35,6 +38,18 @@ export interface TargetConfigInput {
   healthBodySchema?: string;
   tags?: readonly string[];
 }
+const TargetConfigInputSchema = Schema.Struct({
+  id: Schema.String,
+  name: Schema.String,
+  url: Schema.String,
+  method: Schema.Literals(["GET", "POST", "HEAD"]),
+  expectedStatus: Schema.Array(Schema.Number),
+  interval: Schema.Union([Schema.Number, Schema.String]),
+  timeout: Schema.Union([Schema.Number, Schema.String]),
+  slowThreshold: Schema.Union([Schema.Number, Schema.String]),
+  healthBodySchema: Schema.optionalKey(Schema.String),
+  tags: Schema.optionalKey(Schema.Array(Schema.String)),
+});
 export class TargetConfig {
   readonly id: TargetId;
   readonly name: string;
@@ -49,13 +64,13 @@ export class TargetConfig {
   constructor(input: TargetConfigInput) {
     this.id = targetId(input.id);
     this.name = input.name.trim();
-    if (!this.name) throw new TypeError("empty name");
+    if (!this.name) throw new ValidationError({ field: "name", reason: "empty name" });
     const url = new URL(input.url);
     if (!/https?:/.test(url.protocol) || !url.hostname)
-      throw new TypeError("invalid URL");
+      throw new ValidationError({ field: "url", reason: "invalid URL" });
     this.url = input.url;
     if (!["GET", "POST", "HEAD"].includes(input.method))
-      throw new TypeError("invalid method");
+      throw new ValidationError({ field: "method", reason: "invalid method" });
     this.method = input.method;
     if (
       !input.expectedStatus.length ||
@@ -63,7 +78,7 @@ export class TargetConfig {
         (x) => !Number.isInteger(x) || x < 100 || x > 599,
       )
     )
-      throw new TypeError("invalid statuses");
+      throw new ValidationError({ field: "expectedStatus", reason: "invalid statuses" });
     this.expectedStatus = input.expectedStatus;
     this.interval = positive(input.interval);
     this.timeout = positive(input.timeout);
@@ -83,7 +98,7 @@ export class Target extends TargetConfig {
 const positive = (d: DurationInput) => {
   const n = durationMillis(d);
   if (!Number.isFinite(n) || n <= 0)
-    throw new TypeError("duration must be positive");
+    throw new ValidationError({ field: "duration", reason: "duration must be positive" });
   return n;
 };
 
@@ -112,8 +127,8 @@ export class CheckFailure {
   }
 }
 export class ResponseMetadata {
-  readonly status?: number;
-  readonly bytes?: number;
+  readonly status: Option.Option<number>;
+  readonly bytes: Option.Option<number>;
   constructor(input: { status?: number; bytes?: number }) {
     if (input.status !== undefined) {
       if (
@@ -121,13 +136,17 @@ export class ResponseMetadata {
         input.status < 100 ||
         input.status > 599
       )
-        throw new TypeError("invalid status");
-      this.status = input.status;
+        throw new ValidationError({ field: "status", reason: "invalid status" });
+      this.status = Option.some(input.status);
+    } else {
+      this.status = Option.none();
     }
     if (input.bytes !== undefined) {
       if (!Number.isSafeInteger(input.bytes) || input.bytes < 0)
-        throw new TypeError("invalid bytes");
-      this.bytes = input.bytes;
+        throw new ValidationError({ field: "bytes", reason: "invalid bytes" });
+      this.bytes = Option.some(input.bytes);
+    } else {
+      this.bytes = Option.none();
     }
     Object.freeze(this);
   }
@@ -138,7 +157,7 @@ export class CheckResult {
   readonly checkedAt: Date;
   readonly duration: number;
   readonly classification: Classification;
-  readonly failure?: CheckFailure;
+  readonly failure: Option.Option<CheckFailure>;
   readonly response: ResponseMetadata;
   constructor(input: {
     id: string;
@@ -154,7 +173,7 @@ export class CheckResult {
     this.checkedAt = new Date(input.checkedAt);
     this.duration = positive(input.duration);
     this.classification = input.classification;
-    if (input.failure) this.failure = input.failure;
+    this.failure = input.failure !== undefined ? Option.some(input.failure) : Option.none();
     this.response = input.response;
     Object.freeze(this);
   }
@@ -163,11 +182,11 @@ export class Incident {
   readonly id: string;
   readonly targetId: TargetId;
   readonly openedAt: Date;
-  readonly closedAt?: Date;
+  readonly closedAt: Option.Option<Date>;
   readonly status: "Open" | "Closed";
   readonly reason: string;
   readonly latestCheckId: string;
-  readonly summary?: string;
+  readonly summary: Option.Option<string>;
   constructor(input: {
     id: string;
     targetId: TargetId;
@@ -178,41 +197,52 @@ export class Incident {
     latestCheckId: string;
     summary?: string;
   }) {
-    Object.assign(this, input);
     this.id = input.id;
     this.targetId = targetId(input.targetId);
     this.openedAt = new Date(input.openedAt);
     this.status = input.status;
     this.reason = input.reason;
     this.latestCheckId = input.latestCheckId;
-    if (input.closedAt) this.closedAt = new Date(input.closedAt);
-    if (input.summary) this.summary = input.summary;
-    if (this.status === "Open" && this.closedAt)
-      throw new TypeError("open incident has close time");
-    if (this.status === "Closed" && !this.closedAt)
-      throw new TypeError("closed incident lacks close time");
-    if (this.closedAt && this.closedAt < this.openedAt)
-      throw new TypeError("close before open");
+    this.closedAt = input.closedAt ? Option.some(new Date(input.closedAt)) : Option.none();
+    this.summary = input.summary ? Option.some(input.summary) : Option.none();
+    if (this.status === "Open" && Option.isSome(this.closedAt))
+      throw new ValidationError({ field: "incident", reason: "open incident has close time" });
+    if (this.status === "Closed" && Option.isNone(this.closedAt))
+      throw new ValidationError({ field: "incident", reason: "closed incident lacks close time" });
+    if (Option.isSome(this.closedAt) && this.closedAt.value < this.openedAt)
+      throw new ValidationError({ field: "incident", reason: "close before open" });
     Object.freeze(this);
   }
 }
-export const decodeTargetConfig = async (input: unknown) =>
-  new TargetConfig(input as TargetConfigInput);
+export const decodeTargetConfig = (input: unknown): Effect.Effect<TargetConfig, Schema.SchemaError> =>
+  Schema.decodeUnknownEffect(TargetConfigInputSchema)(input).pipe(
+    Effect.map((decoded) => new TargetConfig(decoded))
+  );
 export const cloneCheck = (c: CheckResult) =>
   new CheckResult({
-    ...c,
+    id: c.id,
+    targetId: c.targetId,
     checkedAt: new Date(c.checkedAt),
+    duration: c.duration,
     classification: new ({ Up, Slow, Down, InvalidResponse, Unknown } as const)[
       c.classification._tag
     ](),
-    ...(c.failure ? { failure: new CheckFailure(c.failure) } : {}),
-    response: new ResponseMetadata(c.response),
+    ...(Option.isSome(c.failure) ? { failure: new CheckFailure(c.failure.value) } : {}),
+    response: new ResponseMetadata({
+      ...(Option.isSome(c.response.status) ? { status: c.response.status.value } : {}),
+      ...(Option.isSome(c.response.bytes) ? { bytes: c.response.bytes.value } : {}),
+    }),
   });
 export const cloneIncident = (i: Incident) =>
   new Incident({
-    ...i,
+    id: i.id,
+    targetId: i.targetId,
     openedAt: new Date(i.openedAt),
-    ...(i.closedAt ? { closedAt: new Date(i.closedAt) } : {}),
+    status: i.status,
+    reason: i.reason,
+    latestCheckId: i.latestCheckId,
+    ...(Option.isSome(i.closedAt) ? { closedAt: new Date(i.closedAt.value) } : {}),
+    ...(Option.isSome(i.summary) ? { summary: i.summary.value } : {}),
   });
 export const cloneTarget = (t: Target) =>
   new Target({

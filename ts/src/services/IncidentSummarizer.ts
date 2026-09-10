@@ -1,3 +1,4 @@
+import { Data } from "effect";
 import type { Incident } from "../domain/schema.js";
 export class IncidentSummary {
   readonly text: string;
@@ -7,14 +8,9 @@ export class IncidentSummary {
     this.text = x.text;
   }
 }
-export class IncidentSummaryError extends Error {
-  readonly _tag = "IncidentSummaryError";
+export class IncidentSummaryError extends Data.TaggedError("IncidentSummaryError")<{
   readonly reason: string;
-  constructor(x: { reason: string }) {
-    super(x.reason);
-    this.reason = x.reason;
-  }
-}
+}> {}
 type Script =
   | "valid"
   | "malformed"
