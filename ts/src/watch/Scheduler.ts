@@ -1,4 +1,5 @@
-import { ConfigError } from "../domain/errors.js";
+import { Effect } from "effect";
+import { ConfigError, type DomainError, type RepositoryError } from "../domain/errors.js";
 import type { Target, TargetConfig } from "../domain/schema.js";
 import { probeOnce } from "../probe/ProbeProgram.js";
 import type { ProbeClientShape } from "../services/ProbeClient.js";
@@ -26,12 +27,12 @@ export async function runOnce(
   targets: readonly (Target | TargetConfig)[],
   options: SchedulerOptions,
   s: SchedulerServices,
-  signal?: AbortSignal,
+  _signal?: AbortSignal,
 ) {
   validate(options);
   const queue = targets.filter(enabled).slice();
   const worker = async (target: Target | TargetConfig) => {
-      const check = await probeOnce(target, s.client, signal);
+      const check = await Effect.runPromise(probeOnce(target, s.client));
       await s.repository.applyCheck(check);
       await s.status.update(
         check,
@@ -62,6 +63,23 @@ export const startWatching = (targets: readonly (Target | TargetConfig)[], optio
   return controller;
 };
 export const Live = { runOnce, watchLoop };
+
+export const runOnceEffect = (
+  targets: readonly (Target | TargetConfig)[],
+  options: SchedulerOptions,
+  s: SchedulerServices,
+): Effect.Effect<void, DomainError | RepositoryError> =>
+  Effect.gen(function*() {
+    validate(options);
+    const queue = targets.filter(enabled);
+    yield* Effect.forEach(queue, (target) =>
+      Effect.gen(function*() {
+        const check = yield* probeOnce(target, s.client);
+        yield* Effect.tryPromise({ try: () => s.repository.applyCheck(check), catch: (e) => e as RepositoryError });
+        const open = yield* Effect.tryPromise({ try: () => s.repository.getOpenIncident(check.targetId), catch: (e) => e as RepositoryError });
+        yield* Effect.tryPromise({ try: () => s.status.update(check, open), catch: (e) => e as DomainError });
+      }), { concurrency: options.workerCount });
+  }) as Effect.Effect<void, DomainError | RepositoryError>;
 
 export class ArrayJobBuffer<A> {
   readonly jobs: A[] = [];

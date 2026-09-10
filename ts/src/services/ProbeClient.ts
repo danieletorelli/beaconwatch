@@ -1,3 +1,4 @@
+import { Context, Effect } from "effect";
 import {
   DnsError,
   InvalidBody,
@@ -17,8 +18,9 @@ export type ProbeFailure =
   | InvalidBody;
 export type ProbeTarget = Target | TargetConfig;
 export interface ProbeClientShape {
-  probe(target: ProbeTarget, signal?: AbortSignal): Promise<RawProbeResponse>;
+  probe(target: ProbeTarget, signal?: AbortSignal): Effect.Effect<RawProbeResponse, ProbeFailure>;
 }
+export class ProbeClient extends Context.Service<ProbeClient, ProbeClientShape>()("beaconwatch/ProbeClient") {}
 type Step =
   | RawProbeResponse
   | ProbeFailure
@@ -52,6 +54,32 @@ export const recoverAfter = (failures: number, response = valid()): Step => ({
   failures,
   response,
 });
+
+const fakeProbeImpl = (
+  scripts: Map<string, Step[]>,
+  counts: Map<string, number>,
+  t: ProbeTarget,
+  _signal?: AbortSignal,
+): Effect.Effect<RawProbeResponse, ProbeFailure> =>
+  Effect.gen(function*() {
+    const key = scripts.has(t.id) ? t.id : t.url;
+    const a = scripts.get(key) ?? [valid()];
+    const step = a[0] ?? valid();
+    if (a.length > 1) a.shift();
+    if (step instanceof Error) return yield* Effect.fail(step as ProbeFailure);
+    if ("_tag" in step && step._tag === "delay") {
+      yield* Effect.sleep(step.duration);
+      return step.response;
+    }
+    if ("_tag" in step && step._tag === "recover-after") {
+      const n = (counts.get(key) ?? 0) + 1;
+      counts.set(key, n);
+      if (n <= step.failures) return yield* Effect.fail(new DnsError({ host: new URL(t.url).host }));
+      return step.response;
+    }
+    return step;
+  });
+
 export class FakeProbeClient implements ProbeClientShape {
   private scripts: Map<string, Step[]>;
   private counts = new Map<string, number>();
@@ -63,23 +91,8 @@ export class FakeProbeClient implements ProbeClientShape {
       ]),
     );
   }
-  async probe(t: ProbeTarget, signal?: AbortSignal) {
-    const key = this.scripts.has(t.id) ? t.id : t.url;
-    const a = this.scripts.get(key) ?? [valid()];
-    const step = a[0] ?? valid();
-    if (a.length > 1) a.shift();
-    if (step instanceof Error) throw step;
-    if ("_tag" in step && step._tag === "delay") {
-      await new Promise<void>((resolve) => setTimeout(resolve, step.duration));
-      return step.response;
-    }
-    if ("_tag" in step && step._tag === "recover-after") {
-      const n = (this.counts.get(key) ?? 0) + 1;
-      this.counts.set(key, n);
-      if (n <= step.failures) throw new DnsError({ host: new URL(t.url).host });
-      return step.response;
-    }
-    return step;
+  probe(t: ProbeTarget, _signal?: AbortSignal): Effect.Effect<RawProbeResponse, ProbeFailure> {
+    return fakeProbeImpl(this.scripts, this.counts, t, _signal);
   }
 }
 export const Fake = (x: Record<string, Step | readonly Step[]>) =>

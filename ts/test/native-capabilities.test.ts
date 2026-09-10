@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { Effect } from "effect";
 import { Target, CheckResult, ResponseMetadata, Up, targetId, durationMillis } from "../src/domain/schema.js";
 import { InMemoryCheckRepository } from "../src/repo/CheckRepository.js";
 import { FakeProbeClient, valid } from "../src/services/ProbeClient.js";
 import { probeOnce } from "../src/probe/ProbeProgram.js";
-import { digestFromStream } from "../src/services/DigestService.js";
+import { digestFromStreamEffect } from "../src/services/DigestService.js";
 import { appConfig } from "../src/services/Config.js";
 import { Fake as fakeSummary } from "../src/services/IncidentSummarizer.js";
 import { ManagedAppRuntime } from "../src/runtime/ManagedRuntime.js";
@@ -17,8 +18,8 @@ describe("BeaconWatch attendee happy paths", () => {
   it("constructs a target", () => expect(target().name).toBe("API"));
   it("stores and lists targets", async () => { const r = new InMemoryCheckRepository(); await r.saveTarget(target()); expect(await r.listTargets()).toHaveLength(1); });
   it("stores and lists checks", async () => { const r = new InMemoryCheckRepository(); await r.saveCheck(check()); expect(await r.listChecks()).toHaveLength(1); });
-  it("probes a healthy target", async () => expect((await probeOnce(target(), new FakeProbeClient({ target_api: valid() }))).classification._tag).toBe("Up"));
-  it("builds a digest", async () => expect((await digestFromStream([check()])).targets).toHaveLength(1));
+  it("probes a healthy target", async () => expect((await Effect.runPromise(probeOnce(target(), new FakeProbeClient({ target_api: valid() })))).classification._tag).toBe("Up"));
+  it("builds a digest", () => expect(Effect.runSync(digestFromStreamEffect([check()])).targets).toHaveLength(1));
   it("loads ordinary config", () => expect(appConfig({ pollInterval: "1000", probeTimeout: "2 seconds", workerConcurrency: 2, slowThreshold: "3 seconds" }).workerConcurrency).toBe(2));
   it("summarizes incidents", async () => expect((await fakeSummary().summarize([])).text).toContain("stable"));
   it("runs managed work", async () => expect(await new ManagedAppRuntime().runPromise(async () => 1)).toBe(1));
