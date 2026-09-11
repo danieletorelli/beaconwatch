@@ -128,3 +128,9 @@ export const ProbeClientFake = {
   timeoutError,
   recoverAfter,
 };
+
+// ---------- Layer helper for the fake double.
+
+import { Layer } from "effect";
+export const FakeLayer = (scripts: ConstructorParameters<typeof FakeProbeClient>[0]) =>
+  Layer.succeed(ProbeClient)(new FakeProbeClient(scripts));

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { Duration, Effect, Option } from "effect";
 import { Target, CheckResult, ResponseMetadata, Up, targetId, durationMillis, type CheckId, type TargetId } from "../src/domain/schema.js";
 import { CheckRepository, InMemoryLayer } from "../src/repo/CheckRepository.js";
-import { FakeProbeClient, valid } from "../src/services/ProbeClient.js";
+import { FakeLayer, valid } from "../src/services/ProbeClient.js";
 import { probeOnce } from "../src/probe/ProbeProgram.js";
 import { digestFromStreamEffect } from "../src/services/DigestService.js";
 import { appConfig } from "../src/services/Config.js";
@@ -18,7 +18,7 @@ describe("BeaconWatch attendee happy paths", () => {
   it("constructs a target", () => expect(target().name).toBe("API"));
   it("stores and lists targets", () => Effect.gen(function*() { const r = yield* CheckRepository; yield* r.saveTarget(target()); expect((yield* r.listTargets())).toHaveLength(1); }).pipe(Effect.provide(InMemoryLayer)));
   it("stores and lists checks", () => Effect.gen(function*() { const r = yield* CheckRepository; yield* r.saveCheck(check()); expect((yield* r.listChecks())).toHaveLength(1); }).pipe(Effect.provide(InMemoryLayer)));
-  it("probes a healthy target", () => Effect.gen(function*() { expect((yield* probeOnce(target(), new FakeProbeClient({ target_api: valid() }))).classification._tag).toBe("Up"); }));
+  it("probes a healthy target", () => Effect.gen(function*() { expect((yield* probeOnce(target()).pipe(Effect.provide(FakeLayer({ target_api: valid() })))).classification._tag).toBe("Up"); }));
   it("builds a digest", () => expect(Effect.runSync(digestFromStreamEffect([check()])).targets).toHaveLength(1));
   it("loads ordinary config", () => expect(appConfig({ pollInterval: "1000", probeTimeout: "2 seconds", workerConcurrency: 2, slowThreshold: "3 seconds" }).workerConcurrency).toBe(2));
   it("summarizes incidents", async () => expect((await fakeSummary().summarize([])).text).toContain("stable"));

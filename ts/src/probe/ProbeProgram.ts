@@ -22,7 +22,7 @@ import {
   type DomainError,
 } from "../domain/errors.js";
 import { classifyProbe } from "../domain/values.js";
-import type { ProbeClientShape, RawProbeResponse } from "../services/ProbeClient.js";
+import { ProbeClient, type RawProbeResponse } from "../services/ProbeClient.js";
 const Ajv = AjvModule as unknown as new (opts?: object) => {
   compile(schema: object): (data: unknown) => boolean;
 };
@@ -55,14 +55,14 @@ const retryPolicy = Schedule.jittered(
 
 export const probeOnce = (
   target: Target | TargetConfig,
-  client: ProbeClientShape,
-): Effect.Effect<CheckResult, DomainError> =>
+): Effect.Effect<CheckResult, DomainError, ProbeClient> =>
   Effect.gen(function*() {
     if ("enabled" in target && !target.enabled)
       return yield* Effect.fail(new TargetDisabled({ targetId: target.id }));
     const start = yield* Clock.currentTimeMillis;
     // Each attempt is cut by the configured timeout; a hanging exchange
     // becomes a transient timeout failure the retry policy may recover.
+    const client = yield* ProbeClient;
     const attempt = client.probe(target).pipe(
       Effect.timeoutOption(target.timeout),
       Effect.flatMap((o) =>

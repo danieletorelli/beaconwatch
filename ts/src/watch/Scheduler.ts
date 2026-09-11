@@ -31,10 +31,9 @@ const checkPipeline = (
   target: Target | TargetConfig,
 ): Effect.Effect<void, DomainError, ProbeClient | CheckRepository | StatusState> =>
   Effect.gen(function*() {
-    const client = yield* ProbeClient;
     const repository = yield* CheckRepository;
     const status = yield* StatusState;
-    const check = yield* probeOnce(target, client);
+    const check = yield* probeOnce(target);
     yield* repository.applyCheck(check);
     const open = yield* repository.getOpenIncident(check.targetId);
     yield* status.update(check, open);

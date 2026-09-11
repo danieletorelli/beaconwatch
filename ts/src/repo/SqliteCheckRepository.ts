@@ -349,8 +349,8 @@ export const layerForFile = (
     Layer.effect(CheckRepository)(
       Effect.gen(function*() {
         const sql = yield* SqlClient.SqlClient;
-        const repo = makeRepo(sql, send);
-        yield* repo.migrate;
+        const repo = makeRepo(sql, send) as SqliteRepo;
+        yield* Effect.orDie(repo.migrate);
         return repo;
       }),
     ),
