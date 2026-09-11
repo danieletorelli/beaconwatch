@@ -49,8 +49,8 @@ export const appConfig = (
       slowThreshold: durationMillis(
         String(env.slowThreshold ?? env.SLOW_THRESHOLD),
       ),
-      telemetryEnabled: Boolean(env.telemetryEnabled || env.TELEMETRY_ENABLED || true),
-      maxIncidents: Number(env.maxIncidents || env.MAX_INCIDENTS || 100),
+      telemetryEnabled: Boolean(env.telemetryEnabled ?? env.TELEMETRY_ENABLED ?? true),
+      maxIncidents: Number(env.maxIncidents ?? env.MAX_INCIDENTS ?? 100),
       ...(env.realLlmToken || env.REAL_LLM_TOKEN
         ? { realLlmToken: String(env.realLlmToken ?? env.REAL_LLM_TOKEN) }
         : {}),

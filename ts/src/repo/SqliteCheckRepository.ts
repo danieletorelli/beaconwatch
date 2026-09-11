@@ -50,24 +50,32 @@ export class SqliteCheckRepository implements CheckRepositoryShape {
     return new Target(x);
   }
   private check(s: string) {
-    const x = JSON.parse(s) as any;
-    return new CheckResult({
-      ...x,
-      checkedAt: new Date(x.checkedAt),
-      classification: new classes[
-        x.classification._tag as keyof typeof classes
-      ](),
-      failure: x.failure && new CheckFailure(x.failure),
-      response: new ResponseMetadata(x.response),
-    });
+    try {
+      const x = JSON.parse(s);
+      return new CheckResult({
+        ...x,
+        checkedAt: new Date(x.checkedAt),
+        classification: new classes[
+          x.classification._tag as keyof typeof classes
+        ](),
+        failure: x.failure && new CheckFailure(x.failure),
+        response: new ResponseMetadata(x.response),
+      });
+    } catch (e) {
+      throw new RepositoryError({ operation: "check", cause: e });
+    }
   }
   private incident(s: string) {
-    const x = JSON.parse(s) as any;
-    return new Incident({
-      ...x,
-      openedAt: new Date(x.openedAt),
-      ...(x.closedAt ? { closedAt: new Date(x.closedAt) } : {}),
-    });
+    try {
+      const x = JSON.parse(s);
+      return new Incident({
+        ...x,
+        openedAt: new Date(x.openedAt),
+        ...(x.closedAt ? { closedAt: new Date(x.closedAt) } : {}),
+      });
+    } catch (e) {
+      throw new RepositoryError({ operation: "incident", cause: e });
+    }
   }
   async saveTarget(t: Target) {
     this.db

@@ -79,13 +79,13 @@ export class TargetConfig {
       )
     )
       throw new ValidationError({ field: "expectedStatus", reason: "invalid statuses" });
-    this.expectedStatus = input.expectedStatus;
+    this.expectedStatus = [...input.expectedStatus];
     this.interval = positive(input.interval);
     this.timeout = positive(input.timeout);
     this.slowThreshold = positive(input.slowThreshold);
     if (input.healthBodySchema !== undefined)
       this.healthBodySchema = input.healthBodySchema;
-    if (input.tags !== undefined) this.tags = input.tags;
+    if (input.tags !== undefined) this.tags = [...input.tags];
   }
 }
 export class Target extends TargetConfig {

@@ -116,5 +116,5 @@ export const probeOnceWithRetry = (
   client: ProbeClientShape,
 ): Effect.Effect<CheckResult, DomainError> =>
   probeOnce(target, client).pipe(
-    Effect.retry({ schedule: Schedule.exponential(10).pipe(Schedule.upTo({ times: 3 })), while: isTransient }),
+    Effect.retry({ schedule: Schedule.jittered(Schedule.exponential(10).pipe(Schedule.upTo({ times: 3 }))), while: isTransient }),
   );

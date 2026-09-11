@@ -41,9 +41,9 @@ export const createApiHandler =
         );
       if (url.pathname.startsWith("/incidents/")) {
         const id = decodeURIComponent(url.pathname.slice(11));
-        const iResult = await repo.getIncident(id);
         if (!incidentIdPattern.test(id))
           return send(400, { message: "invalid incident id" });
+        const iResult = await repo.getIncident(id);
         return Option.isSome(iResult)
           ? send(200, {
               id: iResult.value.id,
@@ -54,7 +54,8 @@ export const createApiHandler =
           : send(404, { message: `incident not found: ${id}` });
       }
       return send(404, { message: "not found" });
-    } catch {
+    } catch (e) {
+      console.error("internal server error:", e);
       return send(500, { message: "internal server error" });
     }
   };
