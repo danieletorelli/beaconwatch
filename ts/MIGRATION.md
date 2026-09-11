@@ -517,7 +517,10 @@ const isTransient = (error: DomainError) =>
   error._tag === "DnsError" || error._tag === "TimeoutError";
 
 probeOnce(target, client).pipe(
-  Effect.retry({ schedule: Schedule.exponential(10).pipe(Schedule.upTo({ times: 3 })), while: isTransient })
+  Effect.retry({
+    schedule: Schedule.jittered(Schedule.exponential(10).pipe(Schedule.upTo({ times: 3 }))),
+    while: isTransient,
+  })
 );
 ```
 
@@ -525,6 +528,7 @@ probeOnce(target, client).pipe(
 - Only transient transport errors (DNS, timeout) are retried
 - Permanent failures propagate immediately without wasting retry budget
 - `while` predicate is evaluated per-error, enabling targeted recovery policy
+- `Schedule.jittered` spreads retry storms as required by the contract
 
 ---
 
@@ -591,6 +595,8 @@ export const classifyDomainError = (e: DomainError): ErrorDisposition =>
     Match.tagsExhaustive({
       TargetDisabled: () => "ignore-disabled" as const,
       InvalidBody: () => "invalid-response" as const,
+      HealthSchemaParseError: () => "invalid-response" as const,
+      HealthBodyMismatch: () => "invalid-response" as const,
       DnsError: () => "service-down" as const,
       TimeoutError: () => "service-down" as const,
       UnexpectedStatus: () => "service-down" as const,
