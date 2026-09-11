@@ -2,8 +2,8 @@ import { describe, expect, it } from "@effect/vitest";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Effect } from "effect";
-import { importHistoryEffect } from "../src/services/DigestService.js";
+import { Effect, Result } from "effect";
+import { decodeHistoryLineEffect, importHistoryEffect } from "../src/services/DigestService.js";
 import { HistoryReadError } from "../src/domain/errors.js";
 
 const row = (id: string, tag: string, millis: number) =>
@@ -82,6 +82,27 @@ describe("history import and digest", () => {
       const digest = yield* importHistoryEffect(path);
       expect(digest.processedRows).toBe(1);
       expect(digest.malformedRows).toBe(1);
+    }));
+
+  it.effect("row-conversion failures become structured rows with line numbers (BUGS 17.9)", () =>
+    Effect.gen(function*() {
+      const malformedLine = JSON.stringify({
+        id: "bad",
+        targetId: "nope", // violates the target id shape
+        checkedAt: "2026-01-01T00:00:00.000Z",
+        durationMillis: 1,
+        classification: { _tag: "Up" },
+        response: {},
+      });
+      const outcome = yield* Effect.result(
+        decodeHistoryLineEffect(malformedLine, 7),
+      );
+      expect(Result.isFailure(outcome)).toBe(true);
+      if (Result.isFailure(outcome)) {
+        expect(outcome.failure._tag).toBe("MalformedHistoryRow");
+        expect(outcome.failure.line).toBe(7);
+        expect(outcome.failure.reason.length).toBeGreaterThan(0);
+      }
     }));
 });
 
