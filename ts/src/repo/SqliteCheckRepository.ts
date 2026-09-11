@@ -14,6 +14,7 @@ import {
   Target,
   Unknown,
   Up,
+  targetId,
   type Classification,
   type TargetId,
 } from "../domain/schema.js";
@@ -80,16 +81,37 @@ export class SqliteCheckRepository implements CheckRepositoryShape {
   }
   private check(s: string) {
     try {
-      const x = JSON.parse(s);
+      // Persisted shape: Option fields appear as Some/None wrappers.
+      const x = JSON.parse(s) as {
+        id: string;
+        targetId: string;
+        checkedAt: string;
+        duration: unknown;
+        classification: { _tag: string };
+        failure?: { _tag: string; value?: { reason: string } };
+        response?: {
+          status?: { _tag: string; value?: number };
+          bytes?: { _tag: string; value?: number };
+        };
+      };
+      // Serialized Option wrappers are unwrapped here, so a decoded check has
+      // exactly the contents it was saved with.
+      const { failure, ...rest } = x;
       return new CheckResult({
-        ...x,
-        duration: decodeDuration(x.duration),
-        checkedAt: new Date(x.checkedAt),
+        ...rest,
+        targetId: targetId(rest.targetId),
+        duration: decodeDuration(rest.duration),
+        checkedAt: new Date(rest.checkedAt),
         classification: new classes[
-          x.classification._tag as keyof typeof classes
+          rest.classification._tag as keyof typeof classes
         ](),
-        failure: x.failure && new CheckFailure(x.failure),
-        response: new ResponseMetadata(x.response),
+        ...(failure?._tag === "Some" && failure.value
+          ? { failure: new CheckFailure({ reason: failure.value.reason }) }
+          : {}),
+        response: new ResponseMetadata({
+          ...(x.response?.status?._tag === "Some" ? { status: x.response.status.value } : {}),
+          ...(x.response?.bytes?._tag === "Some" ? { bytes: x.response.bytes.value } : {}),
+        }),
       });
     } catch (e) {
       throw new RepositoryError({ operation: "check", cause: e });
@@ -99,9 +121,14 @@ export class SqliteCheckRepository implements CheckRepositoryShape {
     try {
       const x = JSON.parse(s);
       return new Incident({
-        ...x,
+        id: x.id,
+        targetId: x.targetId,
         openedAt: new Date(x.openedAt),
-        ...(x.closedAt ? { closedAt: new Date(x.closedAt) } : {}),
+        status: x.status,
+        reason: x.reason,
+        latestCheckId: x.latestCheckId,
+        ...(x.closedAt?._tag === "Some" ? { closedAt: new Date(x.closedAt.value) } : {}),
+        ...(x.summary?._tag === "Some" ? { summary: x.summary.value } : {}),
       });
     } catch (e) {
       throw new RepositoryError({ operation: "incident", cause: e });
