@@ -123,9 +123,7 @@ export class BulletinBus<A> {
     return Effect.gen(function*() {
       const subscription = yield* PubSub.subscribe(pubsub);
       yield* Effect.forever(
-        Effect.map(PubSub.take(subscription), (value) => Effect.sync(() => deliver(value))).pipe(
-          Effect.flatMap((effect) => effect),
-        ),
+        Effect.flatMap(PubSub.take(subscription), (value) => Effect.sync(() => deliver(value))),
       );
     }).pipe(Effect.scoped);
   }
