@@ -10,6 +10,8 @@ export const classifyDomainError = (e: DomainError): ErrorDisposition =>
     Match.tagsExhaustive({
       TargetDisabled: () => "ignore-disabled" as const,
       InvalidBody: () => "invalid-response" as const,
+      HealthSchemaParseError: () => "invalid-response" as const,
+      HealthBodyMismatch: () => "invalid-response" as const,
       DnsError: () => "service-down" as const,
       TimeoutError: () => "service-down" as const,
       UnexpectedStatus: () => "service-down" as const,

@@ -15,6 +15,12 @@ export class UnexpectedStatus extends Data.TaggedError("UnexpectedStatus")<{
 export class InvalidBody extends Data.TaggedError("InvalidBody")<{
   readonly reason: string;
 }> {}
+export class HealthSchemaParseError extends Data.TaggedError("HealthSchemaParseError")<{
+  readonly reason: string;
+}> {}
+export class HealthBodyMismatch extends Data.TaggedError("HealthBodyMismatch")<{
+  readonly reason: string;
+}> {}
 export class TargetDisabled extends Data.TaggedError("TargetDisabled")<{
   readonly targetId: string;
 }> {}
@@ -38,6 +44,8 @@ export type DomainError =
   | TimeoutError
   | UnexpectedStatus
   | InvalidBody
+  | HealthSchemaParseError
+  | HealthBodyMismatch
   | TargetDisabled
   | RepositoryError
   | ConfigError
