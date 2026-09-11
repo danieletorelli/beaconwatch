@@ -68,16 +68,20 @@ export const PositiveDuration = Schema.Union([
   ),
 );
 
-// Names are trimmed non-empty strings; urls must be lexical http(s) urls.
+// Names are trimmed non-empty strings: the decode boundary emits the trimmed
+// name, and whitespace-only input never validates on either side.
 export const TargetName = Schema.String.pipe(
-  Schema.decodeTo(Schema.String, {
-    decode: SchemaGetter.transform((s: string) => {
-      const trimmed = s.trim();
-      if (trimmed.length === 0) throw new Error("name must not be empty");
-      return trimmed;
-    }),
-    encode: SchemaGetter.transform((s: string) => s),
-  }),
+  Schema.decodeTo(
+    Schema.String.check(
+      Schema.makeFilter((s: string) =>
+        s.trim().length > 0 ? undefined : "name must not be empty",
+      ),
+    ),
+    {
+      decode: SchemaGetter.transform((s: string) => s.trim()),
+      encode: SchemaGetter.transform((s: string) => s),
+    },
+  ),
 );
 export const HttpUrl = Schema.String.check(
   Schema.makeFilter((s: string) => {

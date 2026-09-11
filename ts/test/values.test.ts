@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Duration, Effect, Layer, Option, Result } from "effect";
+import { Duration, Effect, Exit, Layer, Option, Result } from "effect";
 import {
   CheckFailure,
   CheckResult,
@@ -10,6 +10,7 @@ import {
   TargetConfig,
   Up,
   cloneCheck,
+  decodeTargetConfig,
   targetId,
   type CheckId,
   type IncidentId,
@@ -294,4 +295,77 @@ describe("incident service (BUGS 4.1)", () => {
       });
       expect(yield* service.acknowledge(check)).toBe("Opened");
     }).pipe(Effect.provide(Layer.provide(IncidentServiceLive, InMemoryLayer))));
+});
+
+describe("schema boundary contracts (contract 2.1-2.2)", () => {
+  it("rejects fractional status codes and fractional byte counts", () => {
+    expect(() => new ResponseMetadata({ status: Option.some(200.5), bytes: Option.none() })).toThrow();
+    expect(() => new ResponseMetadata({ status: Option.none(), bytes: Option.some(10.5) })).toThrow();
+  });
+
+  it("rejects malformed urls and retains valid percent-encoded content", () => {
+    const base = {
+      name: "API",
+      method: "GET" as const,
+      expectedStatus: [200] as [number, ...number[]],
+      interval: Duration.millis(10),
+      timeout: Duration.millis(50),
+      slowThreshold: Duration.millis(100),
+    };
+    expect(() => new TargetConfig({ ...base, id: targetId("target_u"), url: "not a url" })).toThrow();
+    expect(() => new TargetConfig({ ...base, id: targetId("target_u"), url: "ftp://x.test" })).toThrow();
+    const ok = new TargetConfig({
+      ...base,
+      id: targetId("target_u"),
+      url: "http://x.test/pa%20th?q=%C3%A9",
+    });
+    expect(ok.url).toBe("http://x.test/pa%20th?q=%C3%A9");
+  });
+
+  it("trims names at the boundary and rejects ids with line breaks", async () => {
+    const base = {
+      method: "GET" as const,
+      expectedStatus: [200] as [number, ...number[]],
+      interval: Duration.millis(10),
+      timeout: Duration.millis(50),
+      slowThreshold: Duration.millis(100),
+      url: "http://example.test",
+    };
+    // The decode boundary trims; unnormalized direct input is rejected.
+    const decoded = await Effect.runPromiseExit(
+      decodeTargetConfig({
+        ...base,
+        id: "target_n",
+        name: "  API  ",
+        expectedStatus: [200],
+        interval: 10,
+        timeout: 50,
+        slowThreshold: 100,
+      }),
+    );
+    expect(Exit.isSuccess(decoded)).toBe(true);
+    if (Exit.isSuccess(decoded)) expect(decoded.value.name).toBe("API");
+    expect(() => new TargetConfig({ ...base, id: targetId("target_n"), name: "   " })).toThrow();
+    expect(() =>
+      new TargetConfig({ ...base, id: "target_line\n" as never, name: "API" }),
+    ).toThrow();
+  });
+
+  it("round-trips a nested CheckFailure through CheckResult structurally", () => {
+    const failure = new CheckFailure({ reason: "DnsError" });
+    const original = new CheckResult({
+      id: "check_rt" as CheckId,
+      targetId: targetId("target_api"),
+      checkedAt: new Date(100),
+      duration: Duration.millis(1500),
+      classification: new Down(),
+      failure: Option.some(failure),
+      response: new ResponseMetadata({ status: Option.some(200), bytes: Option.none() }),
+    });
+    const clone = cloneCheck(original);
+    expect(clone.failure._tag).toBe("Some");
+    expect(Option.getOrThrow(clone.failure).reason).toBe("DnsError");
+    // Duration survives as a first-class value with exact millis.
+    expect(Duration.toMillis(clone.duration)).toBe(1500);
+  });
 });
