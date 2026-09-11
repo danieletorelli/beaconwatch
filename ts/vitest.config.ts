@@ -12,10 +12,10 @@ export default defineConfig({
       // src/stm (StatusBoard) is excluded: it is the intentionally unfixed
       // "before" fixture for the module-16 checkpoint exercise.
       thresholds: {
-        lines: 80,
-        functions: 70,
-        statements: 75,
-        branches: 65
+        lines: 85,
+        functions: 85,
+        statements: 85,
+        branches: 70
       }
     }
   }
