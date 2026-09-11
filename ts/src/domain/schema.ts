@@ -49,18 +49,31 @@ export interface TargetConfigInput {
   healthBodySchema?: string;
   tags?: readonly string[];
 }
-const TargetConfigInputSchema = Schema.Struct({
-  id: Schema.String,
+// Shared target-config boundary schema: the single source for the decoder,
+// the class constructor's own checks, and the JSON Schema artifact so the
+// three encodings can never disagree (module 11).
+const positiveDuration = Schema.makeFilter((d: number | string) => {
+  try {
+    return durationMillis(d) > 0 ? undefined : "duration must be positive";
+  } catch {
+    return "duration must be positive";
+  }
+});
+export const TargetConfigSchema = Schema.Struct({
+  id: Schema.String.check(Schema.isPattern(/^target_[a-z0-9][a-z0-9_-]*$/)),
   name: Schema.String,
   url: Schema.String,
   method: Schema.Literals(["GET", "POST", "HEAD"]),
-  expectedStatus: Schema.Array(Schema.Number),
-  interval: Schema.Union([Schema.Number, Schema.String]),
-  timeout: Schema.Union([Schema.Number, Schema.String]),
-  slowThreshold: Schema.Union([Schema.Number, Schema.String]),
+  expectedStatus: Schema.NonEmptyArray(
+    Schema.Int.check(Schema.isBetween({ minimum: 100, maximum: 599 })),
+  ),
+  interval: Schema.Union([Schema.Number, Schema.String]).check(positiveDuration),
+  timeout: Schema.Union([Schema.Number, Schema.String]).check(positiveDuration),
+  slowThreshold: Schema.Union([Schema.Number, Schema.String]).check(positiveDuration),
   healthBodySchema: Schema.optionalKey(Schema.String),
   tags: Schema.optionalKey(Schema.Array(Schema.String)),
 });
+const TargetConfigInputSchema = TargetConfigSchema;
 export class TargetConfig {
   readonly id: TargetId;
   readonly name: string;
