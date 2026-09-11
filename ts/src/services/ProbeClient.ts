@@ -94,19 +94,21 @@ export class FakeProbeClient implements ProbeClientShape {
     for (const [key, steps] of scripts) {
       if (steps.length === 0)
         throw new ValidationError({ field: key, reason: "script sequence must not be empty" });
-      for (const step of steps)
+      for (const step of steps) {
         if (
           typeof step === "object" &&
           step !== null &&
           "_tag" in step &&
-          step._tag === "recover-after" &&
-          !(Number.isSafeInteger((step as { failures: number }).failures) &&
-            (step as { failures: number }).failures >= 0)
-        )
-          throw new ValidationError({
-            field: key,
-            reason: "recover-after count must be a non-negative safe integer",
-          });
+          step._tag === "recover-after"
+        ) {
+          const failures = (step as { failures: number }).failures;
+          if (!Number.isSafeInteger(failures) || failures < 0)
+            throw new ValidationError({
+              field: key,
+              reason: "recover-after count must be a non-negative safe integer",
+            });
+        }
+      }
     }
     this.scripts = scripts;
   }

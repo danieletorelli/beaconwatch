@@ -40,37 +40,3 @@ export const runOnceEffect = (
         yield* s.status.update(check, open);
       }), { concurrency: options.workerCount });
   }) as Effect.Effect<void, DomainError | RepositoryError>;
-
-export class ArrayJobBuffer<A> {
-  readonly jobs: A[] = [];
-  offer(job: A) { this.jobs.push(job); return true; }
-}
-export class JobBuffer<A> {
-  readonly jobs: A[] = [];
-  accepted = 0;
-  rejected = 0;
-  dropped = 0;
-  stopped = false;
-  constructor(readonly capacity = 128) {}
-  offer(job: A) {
-    if (this.stopped) { this.rejected++; return false; }
-    if (this.jobs.length >= this.capacity) { this.dropped++; return false; }
-    this.jobs.push(job); this.accepted++; return true;
-  }
-  take() { return this.jobs.shift(); }
-  shutdown() { this.stopped = true; this.jobs.length = 0; }
-}
-export const callbackJobAdapter = <A>(buffer: JobBuffer<A>) =>
-  (job: A) => { buffer.offer(job); };
-
-export class BulletinBus<A> {
-  private subscribers: Array<(value: A) => void> = [];
-  subscribe(f: (value: A) => void) { this.subscribers.push(f); }
-  publish(value: A) { this.subscribers.shift()?.(value); }
-}
-
-export class WorkerBroadcast<A> {
-  private workers: Array<(value: A) => void> = [];
-  addWorker(f: (value: A) => void) { this.workers.push(f); }
-  offer(value: A) { for (const worker of this.workers) worker(value); }
-}

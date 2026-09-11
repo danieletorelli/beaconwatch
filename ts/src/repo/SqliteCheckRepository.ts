@@ -211,8 +211,10 @@ export class SqliteCheckRepository implements CheckRepositoryShape {
       if (Option.isSome(openResult)) await this.saveIncident(openResult.value);
       if (transition === "Closed") {
         for (const row of this.db
-          .prepare("select json from incidents")
-          .all() as Row[]) {
+          .prepare(
+            "select json from incidents where json_extract(json,'$.targetId')=?",
+          )
+          .all(String(c.targetId)) as Row[]) {
           const i = this.incident(String(row.json));
           const updatedResult = await this.memory.getIncident(i.id);
           if (Option.isSome(updatedResult)) await this.saveIncident(updatedResult.value);

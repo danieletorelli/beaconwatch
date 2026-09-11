@@ -62,7 +62,7 @@ const toCheck = (x: HistoryRow) =>
       x.classification._tag as keyof typeof classes
     ](),
     ...(x.failure ? { failure: new CheckFailure(x.failure) } : {}),
-    response: new ResponseMetadata(x.response ?? {}),
+    response: new ResponseMetadata(x.response),
   });
 
 export const digestFromStreamEffect = (
