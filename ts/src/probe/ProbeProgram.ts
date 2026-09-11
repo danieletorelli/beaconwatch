@@ -26,7 +26,7 @@ import { ProbeClient, type RawProbeResponse } from "../services/ProbeClient.js";
 const Ajv = AjvModule as unknown as new (opts?: object) => {
   compile(schema: object): (data: unknown) => boolean;
 };
-const ajv = new Ajv({ strict: false });
+
 export const decodeHealthSchema = (encoded: string): Effect.Effect<object, HealthSchemaParseError> =>
   Effect.try({
     try: () => {
@@ -40,8 +40,10 @@ export const decodeHealthSchema = (encoded: string): Effect.Effect<object, Healt
     catch: (e) => new HealthSchemaParseError({ reason: `invalid health schema: ${String(e)}` }),
   });
 const validateBody = (schema: object, body: unknown): Effect.Effect<boolean, HealthSchemaParseError> =>
+  // A fresh compiler per call: Ajv memoizes compiled schemas by $id, so
+  // reusing an identical schema must not collide (contract 3.2 rule 2).
   Effect.try({
-    try: () => ajv.compile(schema)(body),
+    try: () => new Ajv({ strict: false }).compile(schema)(body),
     catch: (e) => new HealthSchemaParseError({ reason: `invalid health schema: ${String(e)}` }),
   });
 const isTransient = (error: DomainError) =>
@@ -84,7 +86,9 @@ export const probeOnce = (
     else failure = outcome.error;
     const end = yield* Clock.currentTimeMillis,
       duration = Math.max(1, end - start);
-    if (raw && target.healthBodySchema !== undefined) {
+    // Body-schema validation applies to non-HEAD probes only; HEAD bypasses
+    // the validation entirely (contract 3.2 rule 2).
+    if (raw && target.method !== "HEAD" && target.healthBodySchema !== undefined) {
       // Schema parse failures are recorded on the check (InvalidResponse with
       // HealthSchemaParseError), not propagated as probe failures.
       const response = raw;

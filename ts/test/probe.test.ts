@@ -2,7 +2,10 @@ import { describe, expect, it } from "@effect/vitest";
 import { Duration, Effect, Fiber, Option, Result } from "effect";
 import { TestClock } from "effect/testing";
 import {
+  CheckFailure,
+  CheckId,
   CheckResult,
+  Down,
   ResponseMetadata,
   Target,
   Up,
@@ -196,4 +199,71 @@ describe("probe classification precedence (BUGS 2.7)", () => {
       expect(check.classification._tag).toBe("Down");
       expect(Option.getOrThrow(check.failure).reason).toBe("UnexpectedStatus");
     }));
+});
+
+describe("body-schema contracts (contract 3.2 rule 2)", () => {
+  it.effect("HEAD bypasses body-schema validation entirely", () =>
+    Effect.gen(function*() {
+      const check = yield* probeOnce(
+        target({
+          method: "HEAD",
+          healthBodySchema: JSON.stringify({ type: "object", required: ["impossible"] }),
+        }),
+      ).pipe(Effect.provide(FakeLayer({ target_api: valid() })));
+      // HEAD is Up even though the schema would reject any object body.
+      expect(check.classification._tag).toBe("Up");
+      expect(Option.isNone(check.failure)).toBe(true);
+    }));
+
+  it.effect("Draft-7 extension and annotation keywords are accepted", () =>
+    Effect.gen(function*() {
+      const schema = JSON.stringify({
+        $id: "https://example.test/health",
+        $schema: "http://json-schema.org/draft-07/schema#",
+        title: "Health envelope",
+        examples: [{ ok: true }],
+        type: "object",
+        properties: { ok: { type: "boolean", "x-extension": true } },
+        required: ["ok"],
+      });
+      const matching = yield* probeOnce(target({ healthBodySchema: schema })).pipe(
+        Effect.provide(FakeLayer({ target_api: { status: 200, body: { ok: true }, bytes: 14 } })),
+      );
+      expect(matching.classification._tag).toBe("Up");
+      const mismatching = yield* probeOnce(target({ healthBodySchema: schema })).pipe(
+        Effect.provide(FakeLayer({ target_api: { status: 200, body: { nope: 1 }, bytes: 12 } })),
+      );
+      expect(Option.getOrThrow(mismatching.failure).reason).toBe("HealthBodyMismatch");
+    }));
+});
+
+describe("same-millisecond incidents (contract 4.2)", () => {
+  it.effect("a later failure after a close opens a distinct incident in the same millisecond", () =>
+    Effect.gen(function*() {
+      const repo = yield* CheckRepository;
+      const failing = (id: string) =>
+        new CheckResult({
+          id: id as CheckId,
+          targetId: targetId("target_api"),
+          checkedAt: new Date(100),
+          duration: Duration.millis(1),
+          classification: new Down(),
+          failure: Option.some(new CheckFailure({ reason: "DnsError" })),
+          response: new ResponseMetadata({ status: Option.some(500), bytes: Option.none() }),
+        });
+      const recovering = new CheckResult({
+        id: "check_up" as CheckId,
+        targetId: targetId("target_api"),
+        checkedAt: new Date(100),
+        duration: Duration.millis(1),
+        classification: new Up(),
+        failure: Option.none(),
+        response: new ResponseMetadata({ status: Option.some(200), bytes: Option.none() }),
+      });
+      expect(yield* repo.applyCheck(failing("check_d1"))).toBe("Opened");
+      expect(yield* repo.applyCheck(recovering)).toBe("Closed");
+      expect(yield* repo.applyCheck(failing("check_d2"))).toBe("Opened");
+      const open = yield* repo.getOpenIncident(targetId("target_api"));
+      expect(Option.isSome(open)).toBe(true);
+    }).pipe(Effect.provide(InMemoryLayer)));
 });
