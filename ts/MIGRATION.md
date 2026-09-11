@@ -13,7 +13,7 @@ codebase.
 `TaggedError` base class were converted to `Data.TaggedError("Tag")<{ fields }>`.
 
 **Files affected:**
-- `domain/errors.ts` — All 8 error types (`DnsError`, `TimeoutError`, `UnexpectedStatus`, `InvalidBody`, `TargetDisabled`, `RepositoryError`, `ConfigError`, `HistoryReadError`) + new `ValidationError`
+- `domain/errors.ts` — All 9 error types (`DnsError`, `TimeoutError`, `UnexpectedStatus`, `InvalidBody`, `TargetDisabled`, `RepositoryError`, `ConfigError`, `HistoryReadError`, `ValidationError`)
 - `services/DigestService.ts` — `MalformedHistoryRow`
 - `services/IncidentSummarizer.ts` — `IncidentSummaryError`
 
@@ -734,3 +734,7 @@ The migration was performed in this order to minimize ripple effects:
 12. **Server** (`http/server.ts`) — Consumer of Option return types
 13. **Digest service** (`services/DigestService.ts`) — Native Effect aggregation
 14. **Status board** (`stm/StatusBoard.ts`) — Effect.sync for synchronous state
+15. **Policy decisions** (`domain/classify-match.ts`) — Match.tagsExhaustive for exhaustive matching
+16. **Clock** (`probe/ProbeProgram.ts`) — Clock.currentTimeMillis for testability
+17. **Configuration** (`services/Config.ts`) — Effect Config layer with Config.all, Config.redacted
+18. **Immutability** (`domain/values.ts`) — Immutable replacement instead of mutation
