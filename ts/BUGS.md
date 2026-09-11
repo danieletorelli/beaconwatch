@@ -1626,29 +1626,29 @@ the confirmed runtime failures.
 
 ## Summary
 
-| Category | Count | Severity Range |
-|----------|-------|---------------|
-| 1. Never-resolving promises | 3 | Critical–High |
-| 2. Logic bugs | 10 | Critical–Low |
-| 3. Resource leaks | 4 | Medium–Low |
-| 4. Fire-and-forget / lost errors | 4 | High–Low |
-| 5. Incorrect state / invariant violations | 4 | High–Low |
-| 6. Type safety issues | 4 | Medium–Low |
-| 7. Incorrect error types | 6 | Medium–Low |
-| 8. Dead code / unused | 9 | Low |
-| 9. Fragile patterns | 1 | Low |
-| 10. API / HTTP issues | 3 | Low |
-| 11. Concurrency / async issues | 1 | Low |
-| 12. Additional domain/boundary bugs | 5 | High–Medium |
-| 13. Additional probe/test-double bugs | 8 | Critical–Low |
-| 14. Additional scheduler bugs | 6 | Critical–Medium |
-| 15. Additional repository/resource bugs | 8 | Critical–High |
-| 16. Additional runtime-lifetime bugs | 3 | Critical–High |
-| 17. Additional cache/history bugs | 9 | Critical–Medium |
-| 18. Additional status/observability bugs | 5 | High–Medium |
-| 19. Additional API/error-mapping bugs | 1 | Medium |
-| 20. Additional recovery/configuration bugs | 3 | High–Medium |
-| **Total** | **97** | |
+| Category                                   | Count  | Severity Range  |
+|--------------------------------------------|--------|-----------------|
+| 1. Never-resolving promises                | 3      | Critical–High   |
+| 2. Logic bugs                              | 10     | Critical–Low    |
+| 3. Resource leaks                          | 4      | Medium–Low      |
+| 4. Fire-and-forget / lost errors           | 4      | High–Low        |
+| 5. Incorrect state / invariant violations  | 4      | High–Low        |
+| 6. Type safety issues                      | 4      | Medium–Low      |
+| 7. Incorrect error types                   | 6      | Medium–Low      |
+| 8. Dead code / unused                      | 9      | Low             |
+| 9. Fragile patterns                        | 1      | Low             |
+| 10. API / HTTP issues                      | 3      | Low             |
+| 11. Concurrency / async issues             | 1      | Low             |
+| 12. Additional domain/boundary bugs        | 5      | High–Medium     |
+| 13. Additional probe/test-double bugs      | 8      | Critical–Low    |
+| 14. Additional scheduler bugs              | 6      | Critical–Medium |
+| 15. Additional repository/resource bugs    | 8      | Critical–High   |
+| 16. Additional runtime-lifetime bugs       | 3      | Critical–High   |
+| 17. Additional cache/history bugs          | 9      | Critical–Medium |
+| 18. Additional status/observability bugs   | 5      | High–Medium     |
+| 19. Additional API/error-mapping bugs      | 1      | Medium          |
+| 20. Additional recovery/configuration bugs | 3      | High–Medium     |
+| **Total**                                  | **97** |                 |
 
 All 97 entries are now either runtime-reproduced against the original baseline
 or directly reproduced by source/type-boundary probes documented in their
