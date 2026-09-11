@@ -850,3 +850,88 @@ The migration was performed in this order to minimize ripple effects:
 18. **Immutability** (`domain/values.ts`) — Immutable replacement instead of mutation
 19. **History import** (`services/DigestService.ts`) — Incremental line stream with fatal UTF-8 decoding
 20. **Duration persistence** (`repo/SqliteCheckRepository.ts`) — Versioned duration codec at the persistence boundary
+21. **Schema classes** (`domain/schema.ts`) — Schema.Class domain with brands, transforms, and filters
+22. **Typed repository services** (`repo/CheckRepository.ts`, `repo/SqliteCheckRepository.ts`) — Effect channels, atomic Ref state, Effect SQL transactions
+23. **R-channel dependency injection** (`probe/ProbeProgram.ts`, `watch/Scheduler.ts`) — probeOnce resolves ProbeClient from the context
+24. **Single configuration path** (`services/Config.ts`) — typed Config Effect with a Redacted secret
+25. **Capability-based digest import** (`services/DigestService.ts`) — FileSystem capability, Sink aggregation, bounded decode concurrency
+26. **Cache and batching** (`obs/DigestCache.ts`, `obs/TargetTagsResolver.ts`) — Cache.makeWith exit-based TTLs; grouped RequestResolver
+27. **Queue scheduler and PubSub primitives** (`watch/Scheduler.ts`) — bounded queue with backpressure and Queue.end; scoped PubSub bus
+28. **Platform API and CLI** (`http/api.ts`, `cli/cli.ts`, `bin.ts`) — HttpApi contract with generated OpenAPI; Command DSL; single process edge
+
+---
+
+## Phase 3: Full Effect-driven architecture (Patterns 21–28)
+
+The final phase moved the migration from "Effect primitives where they fit"
+to a fully Effect-driven architecture while keeping every behavioral contract
+pinned by tests.
+
+### Pattern 21: Hand-Validated Classes → `Schema.Class` Domain
+
+**What changed:** The hand-written constructor checks were replaced by
+schema-backed classes — `TargetConfig`, `Target`, `CheckResult`,
+`CheckFailure`, `ResponseMetadata`, `Incident`, and the five classifications
+become `Schema.Class`/`Schema.TaggedClass` values whose constructors validate
+against one shared schema.
+
+**Why:**
+- Branded `TargetId`/`CheckId`/`IncidentId` fields; well-formed Unicode
+  strings; lexical http(s) URL filter; trimmed non-empty names
+- Durations are first-class `Duration` values from a strictly positive
+  transform (bare numbers are milliseconds, unit strings use their unit);
+  nanosecond precision is exact; positive infinity satisfies the boundary
+- Accepted dates enforce calendar validity and the UTC year 0001–9999 range
+- Incident windows keep their cross-field constraints as a struct filter
+- The JSON Schema artifact derives from the classes, so the artifact and the
+  decoder can never disagree
+
+### Pattern 22: Promise-Shaped Repositories → Typed Services with One Decision
+
+**What changed:** The repository shape declares typed channels — every method
+returns `Effect<..., RepositoryError>`. The volatile implementation holds all
+state in one atomic `Ref` (transitions serialize by construction), the SQLite
+implementation runs on the Effect SQL client with `withTransaction`, and the
+incident transition decision is a shared pure function so both repositories
+keep identical semantics from one source. Event and outbox rows are written
+inside the commit transaction; external delivery starts only after commit.
+
+### Pattern 23: Parameter Injection → R-Channel Resolution
+
+**What changed:** `probeOnce` declares `ProbeClient` as a Context requirement
+instead of a parameter; the scheduler resolves repository services from the R
+channel. Implementations are wired once at a boundary through Layers.
+
+### Pattern 24: Dual Configuration Paths → One Typed Path
+
+**What changed:** The sync env-parsing fallback is gone. Reading
+configuration is an Effect built from the Config module — typed Duration
+fields, bounded integer validation, and a `Redacted` secret as `Option`.
+
+### Pattern 25: Hard-Wired Node APIs → Capabilities, Sinks, Bounds
+
+**What changed:** History import consumes the replaceable `FileSystem`
+capability through a fatal-decoding line stream, aggregates through a
+`Sink`, and decodes rows with a bounded concurrency limit.
+
+### Pattern 26: Repeated Lookups → `Cache` and `RequestResolver`
+
+**What changed:** The digest cache runs on `Cache.makeWith` (single-flight,
+bounded, exit-based TTLs: one minute for successes, one second for
+failures). Metadata lookups go through a grouped `RequestResolver`, so
+concurrent requests collapse into one batched call per window.
+
+### Pattern 27: Hand-Rolled Coordination → `Queue` and `PubSub`
+
+**What changed:** The scheduler is a real producer/consumer pipeline: a
+bounded queue with capacity backpressure, a producer that signals completion
+with `Queue.end`, and `workerCount` consumers draining until the Done signal.
+`BulletinBus` and `WorkerBroadcast` are PubSub- and Queue-backed scoped
+primitives.
+
+### Pattern 28: Manual Surfaces → Platform Contracts
+
+**What changed:** The HTTP API contract is expressed as `HttpApi` endpoints
+with typed DTO schemas and a typed `ApiError`; the served OpenAPI artifact is
+generated from the contract. The CLI is the `Command` DSL with
+schema-validated arguments. `bin.ts` is the only process edge.
