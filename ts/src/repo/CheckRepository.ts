@@ -1,4 +1,4 @@
-import { Context, Option } from "effect";
+import { Context, Layer, Option } from "effect";
 import { randomUUID } from "node:crypto";
 import {
   CheckResult,
@@ -162,3 +162,4 @@ export class InMemoryCheckRepository implements CheckRepositoryShape {
   }
 }
 export const InMemory = () => new InMemoryCheckRepository();
+export const InMemoryLayer = Layer.succeed(CheckRepository)(new InMemoryCheckRepository());

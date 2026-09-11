@@ -346,7 +346,9 @@ dependency injection.
 
 **Files affected:**
 - `services/ProbeClient.ts` — `ProbeClient`
-- `repo/CheckRepository.ts` — `CheckRepository`
+- `repo/CheckRepository.ts` — `CheckRepository`, `InMemoryLayer`
+- `watch/StatusState.ts` — `StatusState`, `StatusStateLayer`
+- `watch/Scheduler.ts` — `checkPipeline` resolves the three tags from the R channel
 
 **Before:**
 ```ts
@@ -365,8 +367,12 @@ export class ProbeClient extends Context.Service<ProbeClient, ProbeClientShape>(
 ```
 
 **Why:**
-- Enables `Effect.provide(ProbeClient.make(liveImpl))` for dependency injection
-- Enables `Effect.service(ProbeClient)` for service access
+- Scheduler workflows declare their capabilities in the R channel and resolve
+  them with `yield* ProbeClient` instead of receiving a services bag as an
+  argument — dependencies become visible types, and the implementation choice
+  moves to one wiring boundary
+- Layers (`Layer.succeed`, `Layer.effect`) provide implementations for tests
+  and composition
 - Type-safe service resolution at the Effect level
 
 ---
