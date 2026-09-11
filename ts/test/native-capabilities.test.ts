@@ -5,7 +5,7 @@ import { CheckRepository, InMemoryLayer } from "../src/repo/CheckRepository.js";
 import { FakeLayer, valid } from "../src/services/ProbeClient.js";
 import { probeOnce } from "../src/probe/ProbeProgram.js";
 import { digestFromStreamEffect } from "../src/services/DigestService.js";
-import { appConfig } from "../src/services/Config.js";
+import { appConfig, testConfigLayer } from "../src/services/Config.js";
 import { Fake as fakeSummary } from "../src/services/IncidentSummarizer.js";
 import { runtime } from "../src/runtime/ManagedRuntime.js";
 import { greet } from "../src/smoke.js";
@@ -20,7 +20,7 @@ describe("BeaconWatch attendee happy paths", () => {
   it("stores and lists checks", () => Effect.gen(function*() { const r = yield* CheckRepository; yield* r.saveCheck(check()); expect((yield* r.listChecks())).toHaveLength(1); }).pipe(Effect.provide(InMemoryLayer)));
   it("probes a healthy target", () => Effect.gen(function*() { expect((yield* probeOnce(target()).pipe(Effect.provide(FakeLayer({ target_api: valid() })))).classification._tag).toBe("Up"); }));
   it("builds a digest", () => expect(Effect.runSync(digestFromStreamEffect([check()])).targets).toHaveLength(1));
-  it("loads ordinary config", () => expect(appConfig({ pollInterval: "1000", probeTimeout: "2 seconds", workerConcurrency: 2, slowThreshold: "3 seconds" }).workerConcurrency).toBe(2));
+  it("loads ordinary config", () => Effect.gen(function*() { const config = yield* Effect.provide(appConfig, testConfigLayer({ pollInterval: "1000", probeTimeout: "2 seconds", workerConcurrency: "2", slowThreshold: "3 seconds" })); expect(config.workerConcurrency).toBe(2); }));
   it("summarizes incidents", async () => expect((await fakeSummary().summarize([])).text).toContain("stable"));
   it("runs managed work", () => runtime.runPromise(Effect.succeed(1)).then((x) => expect(x).toBe(1)));
   it("retains the command smoke path", async () => expect(await greet("BeaconWatch")).toBe("hello BeaconWatch"));
