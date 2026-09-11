@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  migrate:
+    name: BeaconWatch migration (typecheck, tests, coverage, build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.19"
+          cache: npm
+          cache-dependency-path: ts/package-lock.json
+
+      - name: Install dependencies (lockfile exactly as supplied)
+        working-directory: ts
+        run: npm ci
+
+      - name: Strict typecheck
+        working-directory: ts
+        run: npm run typecheck
+
+      - name: Full test suite
+        working-directory: ts
+        run: npm test
+
+      - name: Coverage with enforced thresholds
+        working-directory: ts
+        run: npm run test:coverage
+
+      - name: Compile the application
+        working-directory: ts
+        run: npm exec tsc
+
+      - name: Verify the compiled process edge
+        working-directory: ts
+        run: |
+          node dist/src/bin.js --help
+          node dist/src/bin.js --version
+
+      - name: Verify every documented command dispatches
+        working-directory: ts
+        run: |
+          node dist/src/bin.js demo
+          node dist/src/bin.js check config.json
+          node dist/src/bin.js serve
+          node dist/src/bin.js digest
+          printf '%s\n' '{"id":"check_1","targetId":"target_api","checkedAt":"2026-01-01T00:00:00Z","durationMillis":5,"classification":{"_tag":"Up"},"response":{}}' > /tmp/history.ndjson
+          node dist/src/bin.js import-history /tmp/history.ndjson
+          BEACONWATCH_REPOSITORY=sqlite node dist/src/bin.js demo
+
+      - name: Clean generated artifacts
+        working-directory: ts
+        run: rm -rf dist coverage
