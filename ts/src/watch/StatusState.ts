@@ -16,47 +16,6 @@ const copy = (e: StatusEntry): StatusEntry => ({
     ? Option.some(cloneIncident(e.openIncident.value))
     : Option.none(),
 });
-export class StatusState {
-  private state = new Map<TargetId, StatusEntry>();
-  async update(check: CheckResult, incident: Option.Option<Incident> = Option.none()) {
-    const old = this.state.get(check.targetId);
-    if (
-      old &&
-      (old.latest.checkedAt > check.checkedAt ||
-        (old.latest.checkedAt.getTime() === check.checkedAt.getTime() &&
-          Buffer.compare(Buffer.from(old.latest.id), Buffer.from(check.id)) >
-            0))
-    )
-      return;
-    await Promise.resolve();
-    this.state.set(
-      check.targetId,
-      copy({ latest: check, openIncident: incident }),
-    );
-  }
-  async get(id: TargetId): Promise<Option.Option<StatusEntry>> {
-    const x = this.state.get(id);
-    return x ? Option.some(copy(x)) : Option.none();
-  }
-  async snapshot() {
-    return new Map([...this.state].map(([k, v]) => [k, copy(v)]));
-  }
-}
-export class Readiness {
-  ready = false;
-  result?: string;
-  async wait() { while (!this.ready) await new Promise((r) => setTimeout(r, 10)); return this.result; }
-  complete(value: string) { this.result = value; this.ready = true; }
-  fail(_error: unknown) {}
-  reset() { this.ready = false; }
-  async runGeneration(value: string) {
-    if (this.result !== undefined) { this.ready = true; return this.wait(); }
-    this.complete(value);
-    return this.wait();
-  }
-}
-export const InMemory = () => new StatusState();
-
 export class StatusStateEffect {
   private state: Ref.Ref<Map<TargetId, StatusEntry>>;
   private constructor(state: Ref.Ref<Map<TargetId, StatusEntry>>) {

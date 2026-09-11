@@ -7,12 +7,3 @@ export const validatePositiveInterval = (seconds: number) => {
 export const assertCheckInvariant = (condition: boolean) => {
   if (!condition) throw new Error("BeaconWatch invariant violated");
 };
-export type Exit<A, E> =
-  | { ok: true; value: A }
-  | { ok: false; cause: { kind: "failure"; error: E } }
-  | { ok: false; cause: { kind: "defect"; defect: unknown } }
-  | { ok: false; cause: { kind: "interruption"; reason?: unknown } };
-export const exitKind = <A, E>(e: Exit<A, E>) =>
-  e.ok ? "success" : "error";
-export const firstTypedFailure = <A, E>(e: Exit<A, E>) =>
-  !e.ok && e.cause.kind === "failure" ? e.cause.error : undefined;

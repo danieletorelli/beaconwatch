@@ -20,10 +20,3 @@ export const classifyDomainError = (e: DomainError): ErrorDisposition =>
     }),
   );
 
-export const policyDecision = (policy: { _tag: string }) => {
-  switch (policy._tag) {
-    case "Ignore": return "ignored";
-    case "Escalate": return "escalated";
-    default: return "accepted";
-  }
-};

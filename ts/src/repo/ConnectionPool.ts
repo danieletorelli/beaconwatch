@@ -44,27 +44,6 @@ export const withConnection = <A>(
   work: (h: ConnectionHandle) => Promise<A>,
 ) => pool.withConnection(work);
 
-export const nestedResources = async (
-  events: string[],
-  failures: { use?: boolean; outerRelease?: boolean; innerRelease?: boolean } = {},
-) => {
-  const acquire = (name: "outer" | "inner", failRelease: boolean) => {
-    events.push(`acquire-${name}`);
-    return {
-      release: async () => {
-        events.push(`release-${name}`);
-        if (failRelease) throw new Error(`${name} release failed`);
-      },
-    };
-  };
-  const outer = acquire("outer", failures.outerRelease ?? false);
-  const inner = acquire("inner", failures.innerRelease ?? false);
-  if (failures.use) throw new Error("nested use failed");
-  events.push("use");
-  await outer.release();
-  await inner.release();
-};
-
 export const nestedResourcesEffect = (
   events: string[],
   failures: { use?: boolean; outerRelease?: boolean; innerRelease?: boolean } = {},
@@ -91,5 +70,5 @@ export class ClientCache {
   private clients: ConnectionHandle[] = [];
   checkout() { return this.clients.pop() ?? { id: Date.now() }; }
   release(client: ConnectionHandle) { this.clients.push(client); }
-  invalidate(client: ConnectionHandle) { this.release(client); }
+  invalidate(_client: ConnectionHandle) { /* discarded, not returned to pool */ }
 }
