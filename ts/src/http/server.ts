@@ -2,7 +2,7 @@ import http from "node:http";
 import { Effect, Option } from "effect";
 import type { CheckRepositoryShape } from "../repo/CheckRepository.js";
 import { incidentIdPattern } from "./api.js";
-import { openApiDocument } from "./openapi.js";
+import { openApiDocument } from "./api.js";
 export const createApiHandler =
   (repo: CheckRepositoryShape) =>
   async (req: http.IncomingMessage, res: http.ServerResponse) => {

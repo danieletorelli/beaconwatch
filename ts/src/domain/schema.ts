@@ -92,9 +92,9 @@ export const HttpUrl = Schema.String.check(
   }),
 );
 
-const CheckIdField = WellFormedString.pipe(Schema.brand("CheckId"));
-const IncidentIdField = WellFormedString.pipe(Schema.brand("IncidentId"));
-const TargetIdField = Schema.String.check(
+export const CheckIdField = WellFormedString.pipe(Schema.brand("CheckId"));
+export const IncidentIdField = WellFormedString.pipe(Schema.brand("IncidentId"));
+export const TargetIdField = Schema.String.check(
   Schema.isPattern(/^target_[a-z0-9][a-z0-9_-]*$/),
 ).pipe(Schema.brand("TargetId"));
 
