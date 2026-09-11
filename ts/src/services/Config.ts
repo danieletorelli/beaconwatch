@@ -40,6 +40,19 @@ export const appConfig = (
     );
     if (!Number.isSafeInteger(workerConcurrency) || workerConcurrency <= 0)
       throw new Error("workerConcurrency must be positive");
+    const telemetryRaw = env.telemetryEnabled ?? env.TELEMETRY_ENABLED;
+    const telemetryEnabled =
+      telemetryRaw === undefined
+        ? true
+        : typeof telemetryRaw === "boolean"
+          ? telemetryRaw
+          : telemetryRaw === "true"
+            ? true
+            : telemetryRaw === "false"
+              ? false
+              : (() => {
+                  throw new Error("telemetryEnabled must be true or false");
+                })();
     const value = {
       pollInterval: parseInt(String(env.pollInterval ?? env.POLL_INTERVAL)),
       probeTimeout: durationMillis(
@@ -49,7 +62,7 @@ export const appConfig = (
       slowThreshold: durationMillis(
         String(env.slowThreshold ?? env.SLOW_THRESHOLD),
       ),
-      telemetryEnabled: Boolean(env.telemetryEnabled ?? env.TELEMETRY_ENABLED ?? true),
+      telemetryEnabled,
       maxIncidents: Number(env.maxIncidents ?? env.MAX_INCIDENTS ?? 100),
       ...(env.realLlmToken || env.REAL_LLM_TOKEN
         ? { realLlmToken: String(env.realLlmToken ?? env.REAL_LLM_TOKEN) }
