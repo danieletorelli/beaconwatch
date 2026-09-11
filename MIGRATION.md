@@ -3,7 +3,8 @@
 This document describes the semantic patterns used to migrate the BeaconWatch
 TypeScript codebase from hand-rolled abstractions to Effect. Each pattern
 groups semantically-related transformations applied consistently across the
-codebase.
+codebase. Source paths in this document are relative to `ts/`, the carried
+participant application; behavioral contracts refer to [`SPEC.md`](./SPEC.md).
 
 ---
 

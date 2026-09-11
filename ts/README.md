@@ -38,8 +38,11 @@ earlier checks.
 - `src/obs`: logging, tracing, metrics, caching, and metadata batching.
 - `test/checkpoint-NN`: focused public migration checks.
 
-Preserve the observable behavior in `../SPEC.md` when that file is supplied
-beside this repository. Do not rewrite unrelated architecture or skip modules.
+Preserve the observable behavior in [`../SPEC.md`](../SPEC.md). The Effect
+migration patterns applied to this application are documented in
+[`../MIGRATION.md`](../MIGRATION.md), and the bugs identified in the original
+source are catalogued in [`../BUGS.md`](../BUGS.md). Do not rewrite unrelated
+architecture or skip modules.
 
 ## Dependency transitions
 

@@ -35,7 +35,7 @@ management platform.
 Install dependencies and compile the application:
 
 ```sh
-cd effect
+cd ts
 npm ci
 npm exec tsc
 ```
@@ -159,14 +159,20 @@ pagination, or filtering endpoints.
 
 ## Incident delivery API
 
-When SQLite persistence is selected, the application layer also provides the
-`OutboxDelivery` service. Incident transitions and their outbox rows commit in
-one transaction. A host supplies the transport when it runs a delivery pass:
+When SQLite persistence is selected, the SQLite repository records a
+delivery-outbox row for every committed incident transition, in the same
+transaction as the check and incident writes. A host supplies the transport
+when it runs a delivery pass over the repository's `deliverPending` capability:
 
 ```ts
-const deliver = OutboxDelivery.use((outbox) =>
-  outbox.deliverPending((eventId) => notificationGateway.send({ eventId }))
-)
+const delivered = await Effect.runPromise(
+  Effect.gen(function*() {
+    const repo = yield* CheckRepository;
+    yield* (repo as SqliteRepo).deliverPending((eventId) =>
+      notificationGateway.send({ eventId }),
+    );
+  }),
+);
 ```
 
 A failed send leaves the event pending. A later pass retries the same event ID,

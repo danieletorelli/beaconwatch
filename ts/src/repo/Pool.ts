@@ -2,7 +2,7 @@ import { Effect, Pool as PoolModule } from "effect";
 import { ConfigError } from "../domain/errors.js";
 
 export const MIN_POOL_SIZE = 1;
-export const MAX_POOL_SIZE = 64;
+export const MAX_POOL_SIZE = 1024;
 
 /**
  * Bounded connection pool (module 10): validates its size at construction —

@@ -2,6 +2,8 @@
 
 This document catalogues bugs in the original BeaconWatch TypeScript implementation
 identified during the Effect migration. Bugs are grouped by semantic category.
+Source paths below are relative to `ts/`, the carried participant application;
+the original sources are preserved in Git history (`git show HEAD:<path>`).
 
 The reproduction ledger below is part of the report, not a list of hypothetical
 concerns. Each entry gives a minimal observation against the original source

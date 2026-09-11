@@ -7,6 +7,7 @@ import { Duration, Effect, Layer } from "effect";
 import { Target, targetId } from "../src/domain/schema.js";
 import { CheckRepository } from "../src/repo/CheckRepository.js";
 import { commandHandlers } from "../src/cli/cli.js";
+import { importHistoryEffect } from "../src/services/DigestService.js";
 import { buildAppLayer, repositoryChoice } from "../src/main.js";
 import { AppLayer } from "../src/runtime/ManagedRuntime.js";
 
@@ -58,6 +59,8 @@ describe("command surface (contract 9, module 16.7)", () => {
 
   it.effect("imports history end to end under the app wiring", () =>
     Effect.gen(function*() {
+      // Use the raw capability: the CLI surface handler swallows failures
+      // and returns void by design.
       const dir = yield* Effect.promise(() => mkdtemp(join(tmpdir(), "bw-main-")));
       const path = join(dir, "history.ndjson");
       const envelope = (id: string, tag: string, millis: number) =>
@@ -72,7 +75,7 @@ describe("command surface (contract 9, module 16.7)", () => {
       yield* Effect.promise(() =>
         writeFile(path, [envelope("a", "Up", 10), envelope("b", "Down", 20)].join("\n") + "\n"),
       );
-      const digest = yield* commandHandlers.importHistory(path);
+      const digest = yield* importHistoryEffect(path);
       expect(digest.processedRows).toBe(2);
       expect(digest.targets).toHaveLength(1);
     }).pipe(Effect.provide(Layer.mergeAll(AppLayer, NodeServices.layer))));

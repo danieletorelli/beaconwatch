@@ -9,6 +9,7 @@ describe("connection pool (module 10)", () => {
     expect(validateSize(-1) instanceof ConfigError).toBe(true);
     expect(validateSize(MAX_POOL_SIZE + 1) instanceof ConfigError).toBe(true);
     expect(validateSize(MAX_POOL_SIZE)).toBeUndefined();
+    expect(validateSize(64)).toBeUndefined();
     expect(validateSize(1)).toBeUndefined();
   });
 

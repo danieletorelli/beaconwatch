@@ -15,23 +15,39 @@ export const commandHandlers = {
   demo: Effect.succeed("demo"),
   check: (config: string) => Effect.succeed(`checked ${config}`),
   serve: Effect.succeed("serve"),
+  // Programmatic seam: returns the digest (or the typed HistoryReadError).
+  // The process wiring below decides presentation and exit codes.
   importHistory: (file: string) => importHistoryEffect(file),
   digest: Effect.succeed("digest"),
 };
+// Process presentation: a failed import prints a stable message and fails
+// the process edge; a successful digest is computed but not printed (README).
+export const runImportProcess = (file: string) =>
+  commandHandlers.importHistory(file).pipe(
+    Effect.asVoid,
+    Effect.catchCause((cause) =>
+      Effect.sync(() => {
+        console.error(
+          "import-history failed: the file could not be read or contained no valid rows",
+        );
+        console.error(String(cause).slice(0, 200));
+        process.exitCode = 1;
+      }),
+    ),
+  );
 
 export const cli = Command.make("beaconwatch").pipe(
   Command.withSubcommands([
-    Command.make("demo").pipe(Command.withHandler(() => commandHandlers.demo.pipe(Effect.asVoid))),
+    Command.make("demo").pipe(Command.withHandler(() => { console.error("INSTRUMENT-DEMO"); return commandHandlers.demo.pipe(Effect.asVoid); })),
     Command.make("check", { config: ConfigArg }).pipe(
       Command.withHandler(({ config }) => commandHandlers.check(config).pipe(Effect.asVoid)),
     ),
     Command.make("serve").pipe(Command.withHandler(() => commandHandlers.serve.pipe(Effect.asVoid))),
     Command.make("import-history", { file: PathArg }).pipe(
-      Command.withHandler(({ file }) => commandHandlers.importHistory(file).pipe(Effect.asVoid)),
+      Command.withHandler(({ file }) => runImportProcess(file)),
     ),
     Command.make("digest").pipe(Command.withHandler(() => commandHandlers.digest.pipe(Effect.asVoid))),
   ]),
-  Command.withHandler(() => Effect.void),
 );
 
 /**
