@@ -7,13 +7,15 @@ export default defineConfig({
     coverage: {
       provider: "v8",
       include: ["src/**/*.ts"],
-      exclude: ["src/cli/**", "src/http/openapi.ts", "src/smoke.ts", "src/main.ts", "src/bin.ts"],
+      exclude: ["src/cli/**", "src/http/openapi.ts", "src/smoke.ts", "src/main.ts", "src/bin.ts", "src/stm/**"],
       // Measured, not assumed: keep the migration coverage measurable.
+      // src/stm (StatusBoard) is excluded: it is the intentionally unfixed
+      // "before" fixture for the module-16 checkpoint exercise.
       thresholds: {
-        lines: 70,
+        lines: 80,
         functions: 70,
-        statements: 70,
-        branches: 60
+        statements: 75,
+        branches: 65
       }
     }
   }

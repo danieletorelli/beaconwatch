@@ -9,6 +9,7 @@ import {
   recordCheckMetricsEffect,
   targetUpDownMetric,
 } from "../src/obs/Telemetry.js";
+import { fiberLocalMinimumLogLevelDemo } from "../src/obs/references.js";
 import { CheckRepository, InMemoryCheckRepository } from "../src/repo/CheckRepository.js";
 import { FakeProbeClient, ProbeClient, valid } from "../src/services/ProbeClient.js";
 import { StatusStateLayer } from "../src/watch/StatusState.js";
@@ -142,5 +143,14 @@ describe("telemetry (BUGS 18.3, contract section 11)", () => {
       yield* recordCheckMetricsEffect(checkLike("Down"));
       const downAfter = (yield* Metric.value(targetUpDownMetric)).count;
       expect(downAfter - downBefore).toBe(0);
+    }));
+});
+
+describe("log level reference (module 13)", () => {
+  it.effect("the minimum log level override is local to the effect", () =>
+    Effect.gen(function*() {
+      const demo = yield* fiberLocalMinimumLogLevelDemo;
+      expect(demo.inside).toBe("Debug");
+      expect(demo.after).toBe(demo.before);
     }));
 });
