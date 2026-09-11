@@ -1,3 +1,4 @@
+import { Config, Duration } from "effect";
 import { ConfigError } from "../domain/errors.js";
 import { durationMillis } from "../domain/schema.js";
 export interface AppConfig {
@@ -9,6 +10,27 @@ export interface AppConfig {
   maxIncidents: number;
   realLlmToken?: string;
 }
+
+export const appConfigLayer = Config.all({
+  pollInterval: Config.duration("POLL_INTERVAL").pipe(Config.withDefault(Duration.seconds(10))),
+  probeTimeout: Config.duration("PROBE_TIMEOUT").pipe(Config.withDefault(Duration.seconds(5))),
+  workerConcurrency: Config.int("WORKER_CONCURRENCY").pipe(Config.withDefault(2)),
+  slowThreshold: Config.duration("SLOW_THRESHOLD").pipe(Config.withDefault(Duration.seconds(3))),
+  telemetryEnabled: Config.boolean("TELEMETRY_ENABLED").pipe(Config.withDefault(true)),
+  maxIncidents: Config.int("MAX_INCIDENTS").pipe(Config.withDefault(100)),
+  realLlmToken: Config.redacted("REAL_LLM_TOKEN"),
+}).pipe(
+  Config.map((raw) => ({
+    pollInterval: Duration.toMillis(raw.pollInterval),
+    probeTimeout: Duration.toMillis(raw.probeTimeout),
+    workerConcurrency: raw.workerConcurrency,
+    slowThreshold: Duration.toMillis(raw.slowThreshold),
+    telemetryEnabled: raw.telemetryEnabled,
+    maxIncidents: raw.maxIncidents,
+    realLlmToken: raw.realLlmToken,
+  })),
+);
+
 export const appConfig = (
   env: Record<string, unknown> = process.env,
 ): AppConfig => {
