@@ -3,6 +3,7 @@ import { Effect, Option, Result } from "effect";
 import { CheckResult, Down, Incident, ResponseMetadata, Target, Up, targetId } from "../src/domain/schema.js";import { InMemoryCheckRepository } from "../src/repo/CheckRepository.js";
 import { RepositoryError } from "../src/domain/errors.js";
 import {
+  SqliteCheckRepository,
   layerForFile,
   makeTempFilename,
 } from "../src/repo/SqliteCheckRepository.js";
@@ -108,6 +109,70 @@ describe("sqlite repository", () => {
       );
       expect(Result.isFailure(outcome)).toBe(true);
     }));
+});
+
+describe("sqlite outbox and decode (BUGS 15.2, 15.3, 15.5, decode fix)", () => {
+  it("persists events inside the transaction and delivers only after commit", async () => {
+    const delivered: number[] = [];
+    const repo = new SqliteCheckRepository(makeTempFilename(), (id) => {
+      delivered.push(id);
+      throw new Error("delivery failure after commit");
+    });
+    await expect(repo.applyCheck(check("check_1", "Down", 100))).rejects.toThrow(
+      "delivery failure after commit",
+    );
+    // The transition was already committed when delivery ran — the event and
+    // outbox rows survive the failed delivery.
+    const events = repo.db.prepare("select id,event_type from incident_events").all() as Array<{ id: number; event_type: string }>;
+    expect(events).toHaveLength(1);
+    expect(events[0]!.event_type).toBe("Opened");
+    const outbox = repo.db.prepare("select event_id, delivered_at from delivery_outbox").all() as Array<{ event_id: number; delivered_at: number | null }>;
+    expect(outbox).toHaveLength(1);
+    expect(outbox[0]!.delivered_at).toBeNull();
+    // The event was already committed when delivery ran — even though the
+    // delivery callback fails, the transition is durable.
+    expect(delivered).toEqual([outbox[0]!.event_id]);
+    const open = await repo.getOpenIncident(targetId("target_api"));
+    expect(Option.getOrThrow(open).latestCheckId).toBe("check_1");
+    expect(Option.getOrThrow(open).status).toBe("Open");
+    repo.db.close();
+  });
+
+  it("incidents round-trip with closed windows intact", async () => {
+    const repo = new SqliteCheckRepository(makeTempFilename());
+    await repo.applyCheck(check("check_1", "Down", 100));
+    await repo.applyCheck(check("check_2", "Up", 200));
+    const incidents = repo.db.prepare("select id from incidents").all() as Array<{ id: string }>;
+    const incident = await repo.getIncident(incidents[0]!.id);
+    const value = Option.getOrThrow(incident);
+    expect(value.status).toBe("Closed");
+    expect(Option.isSome(value.closedAt)).toBe(true);
+    expect(Option.getOrThrow(value.closedAt).getTime()).toBeGreaterThanOrEqual(200);
+    repo.db.close();
+  });
+
+  it("unknown duration encodings fail as repository errors (15.5)", async () => {
+    const repo = new SqliteCheckRepository(makeTempFilename());
+    repo.db
+      .prepare("insert into checks(id,json) values(?,?)")
+      .run(
+        "check_bad",
+        JSON.stringify({
+          id: "check_bad",
+          targetId: "target_api",
+          checkedAt: new Date(0).toISOString(),
+          duration: { tag: "bogus", nonsense: 1 },
+          classification: { _tag: "Up" },
+          failure: { _id: "Option", _tag: "None" },
+          response: {
+            status: { _id: "Option", _tag: "None" },
+            bytes: { _id: "Option", _tag: "None" },
+          },
+        }),
+      );
+    await expect(repo.listChecks()).rejects.toBeInstanceOf(RepositoryError);
+    repo.db.close();
+  });
 });
 
 describe("incident validation", () => {
