@@ -5,7 +5,7 @@ export type TargetId = string & { readonly __brand: "TargetId" };
 export type DurationInput = number | string;
 
 export const durationMillis = (input: DurationInput): number => {
-  if (typeof input === "number") return input * 1_000;
+  if (typeof input === "number") return input; // unitless = milliseconds
   const match =
     /^\s*(-?\d+(?:\.\d+)?)\s*(ms|millis(?:econds?)?|seconds?|minutes?|hours?|nanos?)?\s*$/i.exec(
       input,
@@ -24,6 +24,17 @@ export const targetId = (value: unknown): TargetId => {
   if (typeof value !== "string" || !/^target_[a-z0-9][a-z0-9_-]*$/.test(value))
     throw new ValidationError({ field: "targetId", reason: "invalid target id" });
   return value as TargetId;
+};
+// Well-formed Unicode: no unpaired surrogates (TextEncoder replaces them).
+const wellFormedUnicode = (s: string) =>
+  new TextDecoder().decode(new TextEncoder().encode(s)) === s;
+const validTimestamp = (d: Date, field: string) => {
+  if (Number.isNaN(d.getTime()))
+    throw new ValidationError({ field, reason: "invalid timestamp" });
+  const year = d.getUTCFullYear();
+  if (year < 1 || year > 9999)
+    throw new ValidationError({ field, reason: "timestamp year must be 0001-9999" });
+  return d;
 };
 export type HttpMethod = "GET" | "POST" | "HEAD";
 export interface TargetConfigInput {
@@ -168,11 +179,15 @@ export class CheckResult {
     failure?: CheckFailure;
     response: ResponseMetadata;
   }) {
+    if (!wellFormedUnicode(input.id))
+      throw new ValidationError({ field: "id", reason: "check id must be well-formed Unicode" });
     this.id = input.id;
     this.targetId = targetId(input.targetId);
-    this.checkedAt = new Date(input.checkedAt);
+    this.checkedAt = validTimestamp(new Date(input.checkedAt), "checkedAt");
     this.duration = positive(input.duration);
     this.classification = input.classification;
+    if (input.failure !== undefined && !wellFormedUnicode(input.failure.reason))
+      throw new ValidationError({ field: "failure", reason: "failure reason must be well-formed Unicode" });
     this.failure = input.failure !== undefined ? Option.some(input.failure) : Option.none();
     this.response = input.response;
     Object.freeze(this);
@@ -197,14 +212,27 @@ export class Incident {
     latestCheckId: string;
     summary?: string;
   }) {
+    if (typeof input.id !== "string" || !/^incident_[a-z0-9][a-z0-9_-]*$/.test(input.id))
+      throw new ValidationError({ field: "id", reason: "invalid incident id" });
     this.id = input.id;
     this.targetId = targetId(input.targetId);
-    this.openedAt = new Date(input.openedAt);
+    this.openedAt = validTimestamp(new Date(input.openedAt), "openedAt");
     this.status = input.status;
+    if (input.status !== "Open" && input.status !== "Closed")
+      throw new ValidationError({ field: "status", reason: "invalid incident status" });
+    if (!wellFormedUnicode(input.reason))
+      throw new ValidationError({ field: "reason", reason: "reason must be well-formed Unicode" });
+    if (!wellFormedUnicode(input.latestCheckId))
+      throw new ValidationError({ field: "latestCheckId", reason: "latestCheckId must be well-formed Unicode" });
+    if (input.summary !== undefined && !wellFormedUnicode(input.summary))
+      throw new ValidationError({ field: "summary", reason: "summary must be well-formed Unicode" });
     this.reason = input.reason;
     this.latestCheckId = input.latestCheckId;
-    this.closedAt = input.closedAt ? Option.some(new Date(input.closedAt)) : Option.none();
-    this.summary = input.summary ? Option.some(input.summary) : Option.none();
+    this.closedAt =
+      input.closedAt !== undefined
+        ? Option.some(validTimestamp(new Date(input.closedAt), "closedAt"))
+        : Option.none();
+    this.summary = input.summary !== undefined ? Option.some(input.summary) : Option.none();
     if (this.status === "Open" && Option.isSome(this.closedAt))
       throw new ValidationError({ field: "incident", reason: "open incident has close time" });
     if (this.status === "Closed" && Option.isNone(this.closedAt))

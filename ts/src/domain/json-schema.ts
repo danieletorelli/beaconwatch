@@ -22,6 +22,17 @@ export const targetJsonSchemaDocument = {
       minItems: 1,
       items: { type: "integer", minimum: 100, maximum: 599 },
     },
+    interval: {
+      anyOf: [{ type: "string" }, { type: "number", exclusiveMinimum: 0 }],
+    },
+    timeout: {
+      anyOf: [{ type: "string" }, { type: "number", exclusiveMinimum: 0 }],
+    },
+    slowThreshold: {
+      anyOf: [{ type: "string" }, { type: "number", exclusiveMinimum: 0 }],
+    },
+    healthBodySchema: { type: "string" },
+    tags: { type: "array", items: { type: "string" } },
     enabled: { type: "boolean" },
   },
 };
