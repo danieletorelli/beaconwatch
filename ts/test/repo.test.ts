@@ -290,3 +290,38 @@ describe("sqlite transactions and rollback", () => {
         expect(String((outcome.failure as { cause: unknown }).cause)).toContain("check_c");
     }).pipe(Effect.provide(layerForFile(makeTempFilename()))));
 });
+
+describe("sqlite concurrency and Unicode (contract 4.2)", () => {
+  it.effect("concurrent failing checks serialize into one Opened and one Updated", () =>
+    Effect.gen(function*() {
+      const repo = yield* CheckRepository;
+      const transitions = yield* Effect.all([
+        repo.applyCheck(check("check_c1", "Down", 100)),
+        repo.applyCheck(check("check_c2", "Down", 200)),
+      ], { concurrency: "unbounded" });
+      expect(transitions.filter((t) => t === "Opened")).toHaveLength(1);
+      expect(transitions.filter((t) => t === "Updated")).toHaveLength(1);
+      const open = yield* repo.getOpenIncident(targetId("target_api"));
+      expect(Option.isSome(open)).toBe(true);
+    }).pipe(Effect.provide(layerForFile(makeTempFilename()))));
+
+  it.effect("Unicode prose round-trips and duplicates stay idempotent", () =>
+    Effect.gen(function*() {
+      const repo = yield* CheckRepository;
+      const emoji = new Incident({
+        id: "incident_u1" as IncidentId,
+        targetId: targetId("target_api"),
+        openedAt: new Date(100),
+        status: "Open",
+        reason: "down – café 🚨",
+        latestCheckId: "check_é1" as never,
+        summary: Option.some("résumé ✅"),
+        closedAt: Option.none(),
+      });
+      yield* repo.saveIncident(emoji);
+      yield* repo.saveIncident(emoji); // idempotent replace
+      const read = yield* repo.getIncident("incident_u1");
+      expect(Option.getOrThrow(read).reason).toBe("down – café 🚨");
+      expect(Option.getOrThrow(Option.getOrThrow(read).summary)).toBe("résumé ✅");
+    }).pipe(Effect.provide(layerForFile(makeTempFilename()))));
+});

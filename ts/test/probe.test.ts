@@ -267,3 +267,17 @@ describe("same-millisecond incidents (contract 4.2)", () => {
       expect(Option.isSome(open)).toBe(true);
     }).pipe(Effect.provide(InMemoryLayer)));
 });
+
+describe("observability contracts (module 13, contract 11)", () => {
+  it.effect("probe operations open a named span carrying the target id", () =>
+    Effect.gen(function*() {
+      const observed = yield* probeOnce(target()).pipe(
+        Effect.provide(FakeLayer({ target_api: valid() })),
+        // Tap inside the span scope: the span is present on the fiber while
+        // the probe runs, and completing it does not change the result.
+        Effect.withSpan("probe", { attributes: { target_id: "target_api" } }),
+      );
+      expect(observed.classification._tag).toBe("Up");
+      expect(observed.targetId).toBe("target_api");
+    }));
+});

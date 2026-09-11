@@ -202,3 +202,43 @@ describe("scheduler edge cases (contract 5)", () => {
       expect(rows[0]!.targetId).toBe("target_on");
     }));
 });
+
+describe("scheduler concurrency contracts (contract 5)", () => {
+  it.effect("post-transition snapshots stay consistent under same-target concurrency", () =>
+    Effect.gen(function*() {
+      const repo = yield* CheckRepository;
+      yield* Effect.all(
+        [
+          runOnceEffect([target({ interval: Duration.millis(10) })], { queueCapacity: 8, workerCount: 1 }),
+          runOnceEffect([target({ interval: Duration.millis(10) })], { queueCapacity: 8, workerCount: 1 }),
+        ],
+        { concurrency: "unbounded", discard: true },
+      );
+      const open = yield* repo.getOpenIncident(targetId("target_api"));
+      // Two healthy runs leave no incident open and no torn state behind.
+      expect(Option.isNone(open)).toBe(true);
+      const checks = yield* repo.listChecks();
+      expect(checks.length).toBeGreaterThanOrEqual(2);
+    }).pipe(Effect.provide(wired({ target_api: valid() }))));
+
+  it.effect("a run with only failing workers fails promptly", () =>
+    Effect.gen(function*() {
+      const exit = yield* Effect.exit(
+        runOnceEffect([target(), target({ id: "target_b" as TargetId })], {
+          queueCapacity: 1,
+          workerCount: 1,
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              StatusStateLayer,
+              InMemoryLayer,
+              Layer.succeed(ProbeClient)({
+                probe: () => Effect.die(new Error("all workers die")),
+              }),
+            ),
+          ),
+        ),
+      );
+      expect(Exit.isFailure(exit)).toBe(true);
+    }));
+});

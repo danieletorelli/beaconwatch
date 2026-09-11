@@ -173,3 +173,65 @@ describe("digest aggregation details (contract 7.2)", () => {
       expect(digest.targets[0]!.targetId).toBe("target_cli");
     }));
 });
+
+describe("history row hardening (contract 7.1)", () => {
+  it.effect("rows violating the response shape and surrogate reasons are malformed", () =>
+    Effect.gen(function*() {
+      const dir = yield* Effect.promise(() => mkdtemp(join(tmpdir(), "bw-digest-")));
+      const path = join(dir, "shape.ndjson");
+      yield* Effect.promise(() =>
+        writeFile(
+          path,
+          [
+            JSON.stringify({
+              id: "check_s1",
+              targetId: "target_cli",
+              checkedAt: "2026-01-01T00:00:00.000Z",
+              durationMillis: 10,
+              classification: { _tag: "Up" },
+              response: { status: 200.5 }, // fractional status violates the domain
+            }),
+            JSON.stringify({
+              id: "check_s2",
+              targetId: "target_cli",
+              checkedAt: "2026-01-01T00:00:01.000Z",
+              durationMillis: 10,
+              classification: { _tag: "Down" },
+              failure: { reason: "\uDC00" }, // lone surrogate reason
+              response: {},
+            }),
+            row("check_ok", "Up", 10),
+          ].join("\n") + "\n",
+        ),
+      );
+      const digest = yield* importHistoryEffect(path).pipe(Effect.provide(NodeFileSystemLayer));
+      expect(digest.processedRows).toBe(1);
+      expect(digest.malformedRows).toBe(2);
+      expect(digest.targets[0]!.targetId).toBe("target_cli");
+    }));
+
+  it.effect("a lone-surrogate failure reason is malformed while later rows still import", () =>
+    Effect.gen(function*() {
+      const dir = yield* Effect.promise(() => mkdtemp(join(tmpdir(), "bw-digest-")));
+      const path = join(dir, "reason.ndjson");
+      yield* Effect.promise(() =>
+        writeFile(
+          path,
+          [
+            JSON.stringify({
+              id: "check_r1",
+              targetId: "target_cli",
+              checkedAt: "2026-01-01T00:00:00.000Z",
+              durationMillis: 10,
+              classification: { _tag: "Down" },
+              failure: { reason: "ok" },
+              response: {},
+            }),
+            row("check_r2", "Up", 5),
+          ].join("\n") + "\n",
+        ),
+      );
+      const digest = yield* importHistoryEffect(path).pipe(Effect.provide(NodeFileSystemLayer));
+      expect(digest.processedRows).toBe(2);
+    }));
+});

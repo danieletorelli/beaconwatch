@@ -1,4 +1,4 @@
-import { Cause, Effect, PubSub, Queue, Schedule } from "effect";
+import { Cause, Effect, Fiber, PubSub, Queue, Schedule } from "effect";
 import { ConfigError, type DomainError } from "../domain/errors.js";
 import type { Target, TargetConfig } from "../domain/schema.js";
 import { probeOnce } from "../probe/ProbeProgram.js";
@@ -55,21 +55,27 @@ export const runOnceEffect = (
       const queue = yield* Queue.make<Target | TargetConfig, Cause.Done>({
         capacity: options.queueCapacity,
       });
-      const worker = Effect.gen(function*() {
-        while (true) {
-          const target = yield* Queue.take(queue);
-          yield* checkPipeline(target);
-        }
-      }).pipe(Effect.catchIf(Cause.isDone, () => Effect.void));
-      yield* Effect.all(
-        [
-          Queue.offerAll(queue, targets.filter(enabled)).pipe(
-            Effect.andThen(Queue.end(queue)),
-          ),
-          ...Array.from({ length: options.workerCount }, () => worker),
-        ],
-        { discard: true },
+      const workers = yield* Effect.all(
+        Array.from({ length: options.workerCount }, () =>
+          Effect.gen(function*() {
+            while (true) {
+              const target = yield* Queue.take(queue);
+              yield* checkPipeline(target);
+            }
+          }).pipe(Effect.catchIf(Cause.isDone, () => Effect.void)).pipe(Effect.forkChild),
+        ),
       );
+      // Fail promptly when a worker dies while the producer is backpressured:
+      // the watcher rethrows the worker's defect, racing ahead of the producer.
+      yield* Effect.raceAll([
+        ...workers.map((worker) =>
+          Effect.flatMap(Fiber.join(worker), () => Effect.never),
+        ),
+        Queue.offerAll(queue, targets.filter(enabled)).pipe(
+          Effect.andThen(Queue.end(queue)),
+          Effect.andThen(Effect.all(workers.map(Fiber.join), { discard: true })),
+        ),
+      ]);
     }),
   );
 

@@ -128,3 +128,16 @@ describe("transport body contracts (contract 3.1)", () => {
       expect(Option.getOrThrow(probe.response.status)).toBe(500);
     }));
 });
+
+describe("UTF-8 body contracts (contract 3.1)", () => {
+  it.live("JSON bodies containing invalid UTF-8 fail as InvalidBody", () =>
+    Effect.gen(function*() {
+      const { url } = yield* mockTargetServer;
+      const clientLayer = Layer.succeed(ProbeClient)(new HttpProbeClient());
+      const probe = yield* probeOnce(target(`${url}/invalid-utf8`)).pipe(
+        Effect.provide(clientLayer),
+      );
+      expect(probe.classification._tag).toBe("InvalidResponse");
+      expect(Option.getOrThrow(probe.failure).reason).toBe("InvalidBody");
+    }));
+});

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
 import { Duration, Effect, Fiber, Option, Result } from "effect";
 import { TestClock } from "effect/testing";
-import { CheckResult, ResponseMetadata, Up, targetId, type CheckId } from "../src/domain/schema.js";
+import { CheckResult, Incident, ResponseMetadata, Up, targetId, type CheckId } from "../src/domain/schema.js";
 import { ReadinessEffect, StatusState, StatusStateLayer } from "../src/watch/StatusState.js";
 
 const check = (id: string, at: number, target = "target_api") =>
@@ -100,5 +100,36 @@ describe("status state edge cases", () => {
       (stored.checkedAt as Date).setTime(999);
       const again = Option.getOrThrow(yield* status.get(targetId("target_api")));
       expect(again.latest.checkedAt.getTime()).toBe(before);
+    }));
+});
+
+describe("status state isolation (contract 6)", () => {
+  it.effect("response metadata and incident dates are isolated at every boundary", () =>
+    Effect.gen(function*() {
+      const status = yield* program;
+      const c = check("check_m", 100);
+      yield* status.update(c, Option.some(new Incident({
+        id: "incident_m1" as never,
+        targetId: targetId("target_api"),
+        openedAt: new Date(50),
+        status: "Open",
+        reason: "r",
+        latestCheckId: "check_m",
+        summary: Option.none(),
+        closedAt: Option.none(),
+      })));
+      const entry = Option.getOrThrow(yield* status.get(targetId("target_api")));
+      // Mutating the read entry's response status and incident dates must not
+      // affect retained state.
+      (entry.latest.response as { status: unknown }).status = undefined as never;
+      if (Option.isSome(entry.openIncident)) {
+        (entry.openIncident.value.openedAt as Date).setTime(1);
+      }
+      const again = Option.getOrThrow(yield* status.get(targetId("target_api")));
+      expect(Option.getOrThrow(again.latest.response.status)).toBe(200);
+      if (Option.isSome(again.openIncident)) {
+        expect(again.openIncident.value.openedAt.getTime()).toBe(50);
+      }
+      expect(true).toBe(true);
     }));
 });

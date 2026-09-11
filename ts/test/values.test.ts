@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Duration, Effect, Exit, Layer, Option, Result } from "effect";
+import { Duration, Effect, Equal, Exit, Layer, Option, Result } from "effect";
 import {
   CheckFailure,
   CheckResult,
@@ -27,11 +27,14 @@ import {
   ConfigError,
   DnsError,
   HealthBodyMismatch,
+  HealthSchemaParseError,
+  HistoryReadError,
   InvalidBody,
   RepositoryError,
   TargetDisabled,
   TimeoutError,
   UnexpectedStatus,
+  ValidationError,
 } from "../src/domain/errors.js";
 
 const target = new Target({
@@ -400,5 +403,71 @@ describe("testkit lifecycle (contract 12)", () => {
     const res = await fetch(`${baseUrl}/targets`);
     expect(res.status).toBe(200);
     await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+});
+
+describe("classification routing completeness (module 03)", () => {
+  it("routes every domain error tag through the disposition table", () => {
+    const routing: Array<[DomainError, string]> = [
+      new TargetDisabled({ targetId: "target_api" }),
+      new InvalidBody({ reason: "x" }),
+      new HealthSchemaParseError({ reason: "x" }),
+      new HealthBodyMismatch({ reason: "x" }),
+      new DnsError({ host: "h" }),
+      new TimeoutError({ timeout: "1 ms" }),
+      new UnexpectedStatus({ expected: [200], actual: 500 }),
+      new RepositoryError({ operation: "x" }),
+      new ConfigError({ reason: "x" }),
+      new HistoryReadError({ path: "p" }),
+      new ValidationError({ field: "f", reason: "x" }),
+    ].map((e): [DomainError, string] => {
+      const d = classifyDomainError(e);
+      return [e, d];
+    });
+    expect(routing).toHaveLength(11);
+    const ignore = routing.filter(([, d]) => d === "ignore-disabled");
+    const invalid = routing.filter(([, d]) => d === "invalid-response");
+    const down = routing.filter(([, d]) => d === "service-down");
+    const operator = routing.filter(([, d]) => d === "operator-action");
+    expect(ignore).toHaveLength(1);
+    expect(invalid).toHaveLength(3);
+    expect(down).toHaveLength(3);
+    expect(operator).toHaveLength(4);
+    // The classification helper then maps dispositions to classifications.
+    const classifications = routing.map(([e]) => {
+      const result = classifyProbe({ target, duration: 1, failure: e });
+      return Result.isSuccess(result) ? result.success._tag : "failure";
+    });
+    expect(classifications).toEqual([
+      "Unknown", "InvalidResponse", "InvalidResponse", "InvalidResponse",
+      "Down", "Down", "Down",
+      "Down", "Down", "Down", "Down",
+    ]);
+  });
+
+  it("structurally equal checks compare through Equal", () => {
+    const make = () =>
+      new CheckResult({
+        id: "check_eq" as CheckId,
+        targetId: targetId("target_api"),
+        checkedAt: new Date(100),
+        duration: Duration.millis(10),
+        classification: new Up(),
+        failure: Option.none(),
+        response: new ResponseMetadata({ status: Option.some(200), bytes: Option.none() }),
+      });
+    expect(Equal.equals(make(), make())).toBe(true);
+    expect(Equal.equals(make(), cloneCheck(make()))).toBe(true);
+    expect(
+      Equal.equals(make(), cloneCheck(new CheckResult({
+        id: "check_eq" as CheckId,
+        targetId: targetId("target_api"),
+        checkedAt: new Date(101),
+        duration: Duration.millis(10),
+        classification: new Up(),
+        failure: Option.none(),
+        response: new ResponseMetadata({ status: Option.some(200), bytes: Option.none() }),
+      }))),
+    ).toBe(false);
   });
 });

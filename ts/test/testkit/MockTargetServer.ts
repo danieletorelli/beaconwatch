@@ -30,6 +30,9 @@ export const mockTargetServer = Effect.acquireRelease(
         flakyCount++;
         res.writeHead(flakyCount === 1 ? 500 : 200);
         res.end(String(flakyCount));
+      } else if (path === "/invalid-utf8") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(Buffer.concat([Buffer.from('{\"ok\":\"'), Buffer.from([0xff, 0xfe]), Buffer.from('\"}')]));
       } else if (path === "/bad-json") {
         res.writeHead(200, { "content-type": "text/plain" });
         res.end("{");
