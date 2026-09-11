@@ -34,10 +34,9 @@ export const makeCheckResult = (x: {
 export const incidentCloseTime = (i: { closedAt: Option.Option<Date> }): Option.Option<Date> =>
   i.closedAt;
 export const sameIncident = (a: object, b: object) => Equal.equals(a, b)
-export const renameCheck = (check: { id: string }, id: string) => {
-  check.id = id;
-  return check;
-};
+export const renameCheck = (check: { id: string }, id: string) => ({
+  ...check, id,
+});
 export const formatIncidentWindow = (
   i: { openedAt: Date; closedAt: Option.Option<Date> },
   timeZone: string,

@@ -145,36 +145,44 @@ export class SqliteCheckRepository implements CheckRepositoryShape {
       .all() as Row[])
       await this.memory.saveIncident(this.incident(String(r.json)));
     const transition = await this.memory.applyCheck(c);
-    await this.saveCheck(c);
-    const openResult = await this.memory.getOpenIncident(c.targetId);
-    if (Option.isSome(openResult)) await this.saveIncident(openResult.value);
-    if (transition === "Closed") {
-      for (const row of this.db
-        .prepare("select json from incidents")
-        .all() as Row[]) {
-        const i = this.incident(String(row.json));
-        const updatedResult = await this.memory.getIncident(i.id);
-        if (Option.isSome(updatedResult)) await this.saveIncident(updatedResult.value);
+    const pendingEvents: number[] = [];
+    this.db.exec("begin");
+    try {
+      await this.saveCheck(c);
+      const openResult = await this.memory.getOpenIncident(c.targetId);
+      if (Option.isSome(openResult)) await this.saveIncident(openResult.value);
+      if (transition === "Closed") {
+        for (const row of this.db
+          .prepare("select json from incidents")
+          .all() as Row[]) {
+          const i = this.incident(String(row.json));
+          const updatedResult = await this.memory.getIncident(i.id);
+          if (Option.isSome(updatedResult)) await this.saveIncident(updatedResult.value);
+        }
       }
-    }
-    if (transition !== "Unchanged") {
-      const incidents = this.db.prepare("select id from incidents where json_extract(json,'$.latestCheckId')=? order by id").all(c.id) as Row[];
-      for (const incident of incidents) {
-        for (let attempt = 0; attempt < 2; attempt++) {
-          this.db.exec("begin");
-          try {
-            const event = this.db.prepare("insert into incident_events(incident_id,check_id,event_type,created_at) values(?,?,?,?) returning id")
-              .get(String(incident.id), c.id, transition, Date.now()) as { id: number };
-            await this.send(event.id);
-            this.db.prepare("insert into delivery_outbox(event_id) values(?)").run(event.id);
-            this.db.exec("commit");
-            break;
-          } catch (error) {
-            this.db.exec("rollback");
-            if (attempt === 1) throw error;
+      if (transition !== "Unchanged") {
+        const incidents = this.db.prepare("select id from incidents where json_extract(json,'$.latestCheckId')=? order by id").all(c.id) as Row[];
+        for (const incident of incidents) {
+          for (let attempt = 0; attempt < 2; attempt++) {
+            try {
+              const event = this.db.prepare("insert into incident_events(incident_id,check_id,event_type,created_at) values(?,?,?,?) returning id")
+                .get(String(incident.id), c.id, transition, Date.now()) as { id: number };
+              this.db.prepare("insert into delivery_outbox(event_id) values(?)").run(event.id);
+              pendingEvents.push(event.id);
+              break;
+            } catch (error) {
+              if (attempt === 1) throw error;
+            }
           }
         }
       }
+      this.db.exec("commit");
+    } catch (error) {
+      this.db.exec("rollback");
+      throw error;
+    }
+    for (const eventId of pendingEvents) {
+      await this.send(eventId);
     }
     return transition;
   }

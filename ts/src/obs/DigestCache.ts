@@ -1,21 +1,12 @@
 import type { TargetId } from "../domain/schema.js";
 import type { TargetDigest } from "../services/DigestService.js";
 export class DigestCache {
-  private identityEntries = new Map<object, Promise<TargetDigest>>();
   private entries = new Map<string, { expires: number; value: Promise<TargetDigest> }>();
   constructor(
     private compute: (id: TargetId) => Promise<TargetDigest>,
     private ttl = 60_000,
     private capacity = 128,
   ) {}
-  async getByIdentity(id: TargetId) {
-    const key = { id };
-    const old = this.identityEntries.get(key);
-    if (old) return { ...(await old) };
-    const value = this.compute(id);
-    this.identityEntries.set(key, value);
-    return { ...(await value) };
-  }
   async get(id: TargetId) {
     const now = Date.now(),
       key = `digest:${String(id).toLowerCase()}`,
