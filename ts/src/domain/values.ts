@@ -80,9 +80,18 @@ export const classifyProbe = (i: {
   failure?: DomainError;
 }): Result.Result<Classification, DomainError> => {
   if (i.failure) {
+    // Standalone classification (SPEC 3.2): disabled maps to Unknown, invalid
+    // body/schema/mismatch to InvalidResponse, and DNS, timeout, unexpected
+    // status, repository, configuration, and history-read failures all map to
+    // Down. The operator-action categorization stays in classifyDomainError.
     const d = classifyDomainError(i.failure);
-    if (d === "operator-action") return Result.fail(i.failure);
-    return Result.succeed(d === "ignore-disabled" ? new Unknown() : d === "invalid-response" ? new InvalidResponse() : new Down());
+    return Result.succeed(
+      d === "ignore-disabled"
+        ? new Unknown()
+        : d === "invalid-response"
+          ? new InvalidResponse()
+          : new Down(),
+    );
   }
   if (i.status === undefined)
     return Result.fail(
