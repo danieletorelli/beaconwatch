@@ -1,8 +1,14 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Effect, Exit, Fiber, Layer, Option, Result } from "effect";
+import { Effect, Exit, Fiber, Layer, Metric, Option, Result } from "effect";
 import { TestClock } from "effect/testing";
-import { Target, targetId } from "../src/domain/schema.js";
+import { Target, CheckResult, Down, ResponseMetadata, Up, targetId } from "../src/domain/schema.js";
 import { InvalidBody } from "../src/domain/errors.js";
+import {
+  activeProbeGauge,
+  probeLatencyMetric,
+  recordCheckMetricsEffect,
+  targetUpDownMetric,
+} from "../src/obs/Telemetry.js";
 import { CheckRepository, InMemoryCheckRepository } from "../src/repo/CheckRepository.js";
 import { FakeProbeClient, ProbeClient, valid } from "../src/services/ProbeClient.js";
 import { StatusStateLayer } from "../src/watch/StatusState.js";
@@ -20,6 +26,16 @@ const target = (overrides: Partial<ConstructorParameters<typeof Target>[0]> = {}
     slowThreshold: "100 ms",
     enabled: true,
     ...overrides,
+  });
+
+const checkLike = (tag: "Up" | "Down") =>
+  new CheckResult({
+    id: "check_t",
+    targetId: targetId("target_api"),
+    checkedAt: new Date(0),
+    duration: 7,
+    classification: tag === "Up" ? new Up() : new Down(),
+    response: new ResponseMetadata({ status: 200 }),
   });
 
 const wired = (
@@ -94,5 +110,37 @@ describe("scheduler", () => {
       yield* Fiber.interrupt(fiber);
       const checks = yield* Effect.tryPromise(() => repo.listChecks());
       expect(checks.length).toBeGreaterThanOrEqual(2);
+    }));
+});
+
+describe("telemetry (BUGS 18.3, contract section 11)", () => {
+  it.effect("the active gauge returns to baseline when the check fails", () =>
+    Effect.gen(function*() {
+      const before = yield* Metric.value(activeProbeGauge);
+      const baseline = before.value;
+      const outcome = yield* Effect.exit(
+        recordCheckMetricsEffect(checkLike("Up")).pipe(
+          Effect.andThen(Effect.fail(new InvalidBody({ reason: "simulated" }))),
+        ),
+      );
+      expect(Exit.isFailure(outcome)).toBe(true);
+      const after = yield* Metric.value(activeProbeGauge);
+      expect(after.value).toBe(baseline);
+    }));
+
+  it.effect("records latency and state per the contract", () =>
+    Effect.gen(function*() {
+      const upBefore = (yield* Metric.value(targetUpDownMetric)).count;
+      const check = checkLike("Up");
+      yield* recordCheckMetricsEffect(check);
+      const upAfter = (yield* Metric.value(targetUpDownMetric)).count;
+      expect(upAfter - upBefore).toBe(1);
+      const histogram = yield* Metric.value(probeLatencyMetric);
+      expect(histogram.count).toBeGreaterThanOrEqual(1);
+      // A failed classification adds 0 to the state counter.
+      const downBefore = (yield* Metric.value(targetUpDownMetric)).count;
+      yield* recordCheckMetricsEffect(checkLike("Down"));
+      const downAfter = (yield* Metric.value(targetUpDownMetric)).count;
+      expect(downAfter - downBefore).toBe(0);
     }));
 });
