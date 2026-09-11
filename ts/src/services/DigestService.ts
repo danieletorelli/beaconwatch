@@ -1,9 +1,10 @@
-import { Data, Effect, Schema, Stream } from "effect";
+import { Data, Duration, Effect, Option, Schema, Stream } from "effect";
 import { createReadStream } from "node:fs";
 import { Readable } from "node:stream";
 import { HistoryReadError } from "../domain/errors.js";
 import {
   CheckFailure,
+  CheckId,
   CheckResult,
   Down,
   InvalidResponse,
@@ -66,15 +67,20 @@ type HistoryRow = typeof HistoryRowSchema.Type;
 
 const toCheck = (x: HistoryRow) =>
   new CheckResult({
-    id: x.id,
+    id: x.id as CheckId,
     targetId: targetId(x.targetId),
     checkedAt: new Date(x.checkedAt),
-    duration: x.durationMillis,
+    duration: Duration.millis(x.durationMillis),
     classification: new classes[
       x.classification._tag as keyof typeof classes
     ](),
-    ...(x.failure ? { failure: new CheckFailure(x.failure) } : {}),
-    response: new ResponseMetadata(x.response),
+    ...(x.failure
+      ? { failure: Option.some(new CheckFailure({ reason: x.failure.reason })) }
+      : { failure: Option.none() }),
+    response: new ResponseMetadata({
+      status: x.response.status === undefined ? Option.none() : Option.some(x.response.status),
+      bytes: x.response.bytes === undefined ? Option.none() : Option.some(x.response.bytes),
+    }),
   });
 
 export const digestFromStreamEffect = (
@@ -109,7 +115,9 @@ export const digestFromStreamEffect = (
             a.checkedAt.getTime() - b.checkedAt.getTime() ||
             Buffer.compare(Buffer.from(a.id), Buffer.from(b.id)),
         );
-        const lat = checks.map((x) => x.duration).sort((a, b) => a - b);
+        const lat = checks
+          .map((x) => Duration.toMillis(x.duration))
+          .sort((a, b) => a - b);
         return {
           targetId: id,
           currentStatus: checks.at(-1)!.classification._tag,

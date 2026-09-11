@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { Effect } from "effect";
-import { Target, CheckResult, ResponseMetadata, Up, targetId, durationMillis } from "../src/domain/schema.js";
+import { Duration, Effect, Option } from "effect";
+import { Target, CheckResult, ResponseMetadata, Up, targetId, durationMillis, type CheckId, type TargetId } from "../src/domain/schema.js";
 import { InMemoryCheckRepository } from "../src/repo/CheckRepository.js";
 import { FakeProbeClient, valid } from "../src/services/ProbeClient.js";
 import { probeOnce } from "../src/probe/ProbeProgram.js";
@@ -10,8 +10,8 @@ import { Fake as fakeSummary } from "../src/services/IncidentSummarizer.js";
 import { ManagedAppRuntime } from "../src/runtime/ManagedRuntime.js";
 import { greet } from "../src/smoke.js";
 
-const target = () => new Target({ id: "target_api", name: "API", url: "http://example.test", method: "GET", expectedStatus: [200], interval: "10 ms", timeout: "50 ms", slowThreshold: "100 ms", enabled: true });
-const check = () => new CheckResult({ id: "check_a", targetId: targetId("target_api"), checkedAt: new Date(0), duration: "1 ms", classification: new Up(), response: new ResponseMetadata({ status: 200 }) });
+const target = () => new Target({ id: "target_api" as TargetId, name: "API", url: "http://example.test", method: "GET", expectedStatus: [200] as [number, ...number[]], interval: Duration.millis(10), timeout: Duration.millis(50), slowThreshold: Duration.millis(100), enabled: true });
+const check = () => new CheckResult({ id: "check_a" as CheckId, targetId: targetId("target_api"), checkedAt: new Date(0), duration: Duration.millis(1), classification: new Up(), failure: Option.none(), response: new ResponseMetadata({ status: Option.some(200), bytes: Option.none() }) });
 
 describe("BeaconWatch attendee happy paths", () => {
   it("parses explicit duration strings", () => expect(durationMillis("2 seconds")).toBe(2000));

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Effect, Fiber, Option, Result } from "effect";
+import { Duration, Effect, Fiber, Option, Result } from "effect";
 import { TestClock } from "effect/testing";
 import {
   CheckResult,
@@ -7,6 +7,7 @@ import {
   Target,
   Up,
   targetId,
+  type TargetId,
 } from "../src/domain/schema.js";
 import { InMemoryCheckRepository } from "../src/repo/CheckRepository.js";
 import {
@@ -25,14 +26,14 @@ const advanceUntilDone = <A, E>(fiber: Fiber.Fiber<A, E>) =>
 
 const target = (overrides: Partial<ConstructorParameters<typeof Target>[0]> = {}) =>
   new Target({
-    id: "target_api",
+    id: "target_api" as TargetId,
     name: "API",
     url: "http://example.test",
     method: "GET",
-    expectedStatus: [200],
-    interval: "10 ms",
-    timeout: "50 ms",
-    slowThreshold: "100 ms",
+    expectedStatus: [200] as [number, ...number[]],
+    interval: Duration.millis(10),
+    timeout: Duration.millis(50),
+    slowThreshold: Duration.millis(100),
     enabled: true,
     ...overrides,
   });
@@ -98,7 +99,7 @@ describe("probe workflow", () => {
     Effect.gen(function*() {
       const client = new FakeProbeClient({ target_api: slowStep(30) });
       const check = yield* probeOnce(
-        target({ timeout: "1 seconds", slowThreshold: "1 ms" }),
+        target({ timeout: Duration.seconds(1), slowThreshold: Duration.millis(1) }),
         client,
       );
       expect(check.classification._tag).toBe("Slow");

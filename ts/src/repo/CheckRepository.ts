@@ -7,6 +7,7 @@ import {
   cloneCheck,
   cloneIncident,
   cloneTarget,
+  type IncidentId,
   type TargetId,
 } from "../domain/schema.js";
 import { RepositoryError } from "../domain/errors.js";
@@ -120,18 +121,22 @@ export class InMemoryCheckRepository implements CheckRepositoryShape {
               status: open.status,
               reason,
               latestCheckId: c.id,
+              summary: open.summary,
+              closedAt: open.closedAt,
             }),
           );
           result = "Updated";
         } else {
           await this.saveIncident(
             new Incident({
-              id: `incident_${randomUUID()}`,
+              id: `incident_${randomUUID()}` as IncidentId,
               targetId: c.targetId,
               openedAt: new Date(),
               status: "Open",
               reason,
               latestCheckId: c.id,
+              summary: Option.none(),
+              closedAt: Option.none(),
             }),
           );
           result = "Opened";
@@ -148,10 +153,12 @@ export class InMemoryCheckRepository implements CheckRepositoryShape {
                 targetId: i.targetId,
                 openedAt: i.openedAt,
                 status: "Closed",
-                closedAt: new Date(Math.max(Date.now(), i.openedAt.getTime())),
                 reason: i.reason,
                 latestCheckId: c.id,
-                ...(Option.isSome(i.summary) ? { summary: i.summary.value } : {}),
+                summary: i.summary,
+                closedAt: Option.some(
+                  new Date(Math.max(Date.now(), i.openedAt.getTime())),
+                ),
               }),
             );
           result = "Closed";

@@ -1,4 +1,4 @@
-import { Effect, Metric } from "effect";
+import { Duration, Effect, Metric } from "effect";
 import type { CheckResult } from "../domain/schema.js";
 
 // Contract section 11: each recorded check observes duration in milliseconds
@@ -13,6 +13,6 @@ export const activeProbeGauge = Metric.gauge("beaconwatch_active_probes");
 export const recordCheckMetricsEffect = (c: CheckResult): Effect.Effect<void> =>
   Effect.gen(function*() {
     yield* Metric.modify(activeProbeGauge, 1);
-    yield* Metric.update(probeLatencyMetric, c.duration);
+    yield* Metric.update(probeLatencyMetric, Duration.toMillis(c.duration));
     yield* Metric.update(targetUpDownMetric, c.classification._tag === "Up" ? 1 : 0);
   }).pipe(Effect.ensuring(Metric.modify(activeProbeGauge, -1)));

@@ -1,5 +1,5 @@
 import AjvModule from "ajv";
-import { Clock, Effect, Option, Result, Schedule } from "effect";
+import { Clock, Duration, Effect, Option, Result, Schedule } from "effect";
 import { randomUUID } from "node:crypto";
 import {
   CheckFailure,
@@ -9,6 +9,7 @@ import {
   ResponseMetadata,
   type Classification,
   type Target,
+  type CheckId,
   type TargetConfig,
 } from "../domain/schema.js";
 import {
@@ -125,19 +126,25 @@ export const probeOnce = (
           ? recordedFailure.actual
           : undefined;
     return new CheckResult({
-      id: `check_${randomUUID()}`,
+      id: `check_${randomUUID()}` as CheckId,
       targetId: target.id,
       checkedAt: new Date(end),
-      duration,
+      duration: Duration.millis(duration),
       classification,
-      ...(recordedFailure ? { failure: new CheckFailure({ reason: recordedFailure._tag }) } : {}),
+      ...(recordedFailure
+        ? { failure: Option.some(new CheckFailure({ reason: recordedFailure._tag })) }
+        : { failure: Option.none() }),
       response: new ResponseMetadata({
         // Out-of-range transport values (for example 600) are deliberately
         // omitted from response metadata.
-        ...(metaStatus !== undefined && metaStatus >= 100 && metaStatus <= 599
-          ? { status: metaStatus }
-          : {}),
-        ...(raw !== undefined && raw.bytes !== undefined ? { bytes: raw.bytes } : {}),
+        status:
+          metaStatus !== undefined && metaStatus >= 100 && metaStatus <= 599
+            ? Option.some(metaStatus)
+            : Option.none(),
+        bytes:
+          raw !== undefined && raw.bytes !== undefined
+            ? Option.some(raw.bytes)
+            : Option.none(),
       }),
     });
   }).pipe(Effect.withSpan("probe", { attributes: { target_id: target.id } }));

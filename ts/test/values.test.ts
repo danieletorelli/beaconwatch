@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Effect, Option, Result } from "effect";
+import { Duration, Effect, Option, Result } from "effect";
 import {
   CheckFailure,
   CheckResult,
@@ -9,7 +9,11 @@ import {
   Target,
   TargetConfig,
   Up,
+  cloneCheck,
   targetId,
+  type CheckId,
+  type IncidentId,
+  type TargetId,
 } from "../src/domain/schema.js";
 import { targetJsonSchemaDocument } from "../src/domain/json-schema.js";
 import { IncidentService } from "../src/services/IncidentService.js";
@@ -29,14 +33,14 @@ import {
 } from "../src/domain/errors.js";
 
 const target = new Target({
-  id: "target_api",
+  id: "target_api" as TargetId,
   name: "API",
   url: "http://example.test",
   method: "GET",
-  expectedStatus: [200],
-  interval: "10 ms",
-  timeout: "50 ms",
-  slowThreshold: "100 ms",
+  expectedStatus: [200] as [number, ...number[]],
+  interval: Duration.millis(10),
+  timeout: Duration.millis(50),
+  slowThreshold: Duration.millis(100),
   enabled: true,
 });
 
@@ -94,12 +98,14 @@ describe("classifyDomainError", () => {
 
 describe("formatIncidentWindow", () => {
   const incident = new Incident({
-    id: "incident_ok",
+    id: "incident_ok" as IncidentId,
     targetId: targetId("target_api"),
     openedAt: new Date(Date.UTC(2026, 0, 2, 3, 4, 5)),
     status: "Open",
     reason: "r",
     latestCheckId: "check_1",
+    summary: Option.none(),
+    closedAt: Option.none(),
   });
   it("emits ISO timestamps with numeric offsets", () => {
     const window = formatIncidentWindow(incident, "Europe/Berlin");
@@ -113,9 +119,10 @@ describe("formatIncidentWindow", () => {
       targetId: incident.targetId,
       openedAt: incident.openedAt,
       status: "Closed",
-      closedAt: new Date(Date.UTC(2026, 0, 2, 5, 0, 0)),
+      closedAt: Option.some(new Date(Date.UTC(2026, 0, 2, 5, 0, 0))),
       reason: incident.reason,
       latestCheckId: incident.latestCheckId,
+      summary: incident.summary,
     });
     expect(formatIncidentWindow(closed, "UTC")).toMatch(/ – 2026-01-02T05:00:00\+00:00$/);
     expect(() => formatIncidentWindow(incident, "Not/AZone")).toThrow();
@@ -131,12 +138,13 @@ describe("boundary validation (BUGS 7.5, 7.6, 12.1)", () => {
     expect(durationMillis(-5)).toBe(-5);
     const base = {
       targetId: targetId("target_api"),
-      duration: "1 ms",
+      duration: Duration.millis(1),
       classification: new Up(),
-      response: new ResponseMetadata({ status: 200 }),
+      failure: Option.none(),
+      response: new ResponseMetadata({ status: Option.some(200), bytes: Option.none() }),
     };
-    expect(() => new CheckResult({ ...base, id: "check_x", checkedAt: new Date(100), duration: "0 ms" })).toThrow();
-    expect(() => new CheckResult({ ...base, id: "check_x", checkedAt: new Date(100), duration: -1 })).toThrow();
+    expect(() => new CheckResult({ ...base, id: "check_x" as CheckId, checkedAt: new Date(100), duration: Duration.millis(0) })).toThrow();
+    expect(() => new CheckResult({ ...base, id: "check_x" as CheckId, checkedAt: new Date(100), duration: Duration.millis(-1) })).toThrow();
   });
 
   it("targetId rejects malformed ids", () => {
@@ -148,23 +156,24 @@ describe("boundary validation (BUGS 7.5, 7.6, 12.1)", () => {
   it("CheckResult rejects invalid timestamps and lone surrogates", () => {
     const base = {
       targetId: targetId("target_api"),
-      duration: "1 ms",
+      duration: Duration.millis(1),
       classification: new Up(),
-      response: new ResponseMetadata({ status: 200 }),
+      failure: Option.none(),
+      response: new ResponseMetadata({ status: Option.some(200), bytes: Option.none() }),
     };
-    expect(() => new CheckResult({ ...base, id: "check_x", checkedAt: new Date(Number.NaN) })).toThrow();
+    expect(() => new CheckResult({ ...base, id: "check_x" as CheckId, checkedAt: new Date(Number.NaN) })).toThrow();
     expect(() =>
-      new CheckResult({ ...base, id: "check_x", checkedAt: new Date(-62167219200000) }),
+      new CheckResult({ ...base, id: "check_x" as CheckId, checkedAt: new Date(-62167219200000) }),
     ).toThrow(); // year 0000
     expect(() =>
-      new CheckResult({ ...base, id: "check_\uD800", checkedAt: new Date(100) }),
+      new CheckResult({ ...base, id: "check_\uD800" as CheckId, checkedAt: new Date(100) }),
     ).toThrow(); // lone surrogate id
     expect(() =>
       new CheckResult({
         ...base,
-        id: "check_x",
+        id: "check_x" as CheckId,
         checkedAt: new Date(100),
-        failure: new CheckFailure({ reason: "\uDC00" }),
+        failure: Option.some(new CheckFailure({ reason: "\uDC00" })),
       }),
     ).toThrow(); // lone surrogate reason
   });
@@ -179,32 +188,36 @@ describe("immutability freezes (BUGS 6.1, 12.3, Pattern 18)", () => {
     expect(renamed).not.toBe(original);
   });
 
-  it("domain values reject in-place mutation", () => {
+  it("clones are independent: mutating a clone never affects the original", () => {
     const check = new CheckResult({
-      id: "check_a",
+      id: "check_a" as CheckId,
       targetId: targetId("target_api"),
       checkedAt: new Date(100),
-      duration: "1 ms",
+      duration: Duration.millis(1),
       classification: new Up(),
-      response: new ResponseMetadata({ status: 200 }),
+      failure: Option.some(new CheckFailure({ reason: "r" })),
+      response: new ResponseMetadata({ status: Option.some(200), bytes: Option.none() }),
     });
-    expect(() => {
-      (check as { id: string }).id = "check_b";
-    }).toThrow();
+    const clone = cloneCheck(check);
+    // The nested failure instance of the clone is a distinct object.
+    expect(Option.getOrThrow(clone.failure)).not.toBe(Option.getOrThrow(check.failure));
+    expect(Option.getOrThrow(clone.failure).reason).toBe("r");
+    expect(clone.response).not.toBe(check.response);
+    expect(Option.getOrThrow(clone.response.status)).toBe(200);
   });
 
   it("TargetConfig copies array inputs", () => {
     const statuses = [200, 301];
     const tags = ["prod"];
     const config = new TargetConfig({
-      id: "target_api",
+      id: "target_api" as TargetId,
       name: "API",
       url: "http://example.test",
       method: "GET",
-      expectedStatus: statuses,
-      interval: "10 ms",
-      timeout: "50 ms",
-      slowThreshold: "100 ms",
+      expectedStatus: statuses as [number, ...number[]],
+      interval: Duration.millis(10),
+      timeout: Duration.millis(50),
+      slowThreshold: Duration.millis(100),
       tags,
     });
     statuses.push(999);
@@ -216,10 +229,13 @@ describe("immutability freezes (BUGS 6.1, 12.3, Pattern 18)", () => {
 
 describe("json-schema artifact (BUGS 12.5)", () => {
   it("is derived from the boundary schema with its constraints", () => {
-    const schema = targetJsonSchemaDocument.schema as {
-      properties: Record<string, { pattern?: string; enum?: string[]; minimum?: number; maximum?: number }>;
-      required?: string[];
-    };
+    const schema = (targetJsonSchemaDocument.definitions as Record<
+      string,
+      {
+        properties: Record<string, { pattern?: string; enum?: string[]; minimum?: number; maximum?: number }>;
+        required?: string[];
+      }
+    >)["TargetConfigEncoded"]!;
     expect(schema.properties.id?.pattern).toBe("^target_[a-z0-9][a-z0-9_-]*$");
     expect(schema.properties.method?.enum).toContain("GET");
     const status = schema.properties.expectedStatus as { items?: { minimum?: number; maximum?: number } };
@@ -245,12 +261,13 @@ describe("incident service (BUGS 4.1)", () => {
     };
     const service = new IncidentService(failing as never);
     const check = new CheckResult({
-      id: "check_1",
+      id: "check_1" as CheckId,
       targetId: targetId("target_api"),
       checkedAt: new Date(0),
-      duration: "1 ms",
+      duration: Duration.millis(1),
       classification: new Down(),
-      response: new ResponseMetadata({ status: 200 }),
+      failure: Option.none(),
+      response: new ResponseMetadata({ status: Option.some(200), bytes: Option.none() }),
     });
     const outcome = await Effect.runPromise(Effect.result(service.acknowledge(check)));
     expect(Result.isFailure(outcome)).toBe(true);
@@ -261,12 +278,13 @@ describe("incident service (BUGS 4.1)", () => {
     const repo = new (await import("../src/repo/CheckRepository.js")).InMemoryCheckRepository();
     const service = new IncidentService(repo);
     const check = new CheckResult({
-      id: "check_1",
+      id: "check_1" as CheckId,
       targetId: targetId("target_api"),
       checkedAt: new Date(0),
-      duration: "1 ms",
+      duration: Duration.millis(1),
       classification: new Down(),
-      response: new ResponseMetadata({ status: 200 }),
+      failure: Option.none(),
+      response: new ResponseMetadata({ status: Option.some(200), bytes: Option.none() }),
     });
     expect(await Effect.runPromise(service.acknowledge(check))).toBe("Opened");
   });

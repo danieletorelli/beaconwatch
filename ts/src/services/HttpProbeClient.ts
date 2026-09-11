@@ -1,4 +1,4 @@
-import { Effect } from "effect";
+import { Duration, Effect } from "effect";
 import {
   DnsError,
   InvalidBody,
@@ -30,7 +30,7 @@ const probeOnceImpl = (
       return yield* Effect.fail(new InvalidBody({ reason: `invalid URL: ${String(e)}` }));
     }
     const own = new AbortController();
-    yield* Effect.sync(() => setTimeout(() => own.abort(), target.timeout));
+    yield* Effect.sync(() => setTimeout(() => own.abort(), Duration.toMillis(target.timeout)));
     const abort = () => own.abort(signal?.reason);
     signal?.addEventListener("abort", abort, { once: true });
     try {

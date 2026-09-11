@@ -1,7 +1,8 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Effect } from "effect";
+import { Duration, Effect, Option } from "effect";
 import type { Server } from "node:http";
 import { InMemoryCheckRepository } from "../src/repo/CheckRepository.js";
+import type { TargetId } from "../src/domain/schema.js";
 import {
   CheckResult,
   Down,
@@ -11,28 +12,30 @@ import {
   Up,
   targetId,
 } from "../src/domain/schema.js";
+import type { CheckId, IncidentId } from "../src/domain/schema.js";
 import { startServer } from "../src/http/server.js";
 
 const check = (id: string, tag: "Up" | "Down") =>
   new CheckResult({
-    id,
+    id: id as CheckId,
     targetId: targetId("target_api"),
     checkedAt: new Date(0),
-    duration: "1 ms",
+    duration: Duration.millis(1),
     classification: tag === "Up" ? new Up() : new Down(),
-    response: new ResponseMetadata({ status: 200 }),
+    failure: Option.none(),
+    response: new ResponseMetadata({ status: Option.some(200), bytes: Option.none() }),
   });
 
 const makeTarget = () =>
   new Target({
-    id: "target_api",
+    id: "target_api" as TargetId,
     name: "API",
     url: "http://example.test",
     method: "GET",
-    expectedStatus: [200],
-    interval: "10 ms",
-    timeout: "50 ms",
-    slowThreshold: "100 ms",
+    expectedStatus: [200] as [number, ...number[]],
+    interval: Duration.millis(10),
+    timeout: Duration.millis(50),
+    slowThreshold: Duration.millis(100),
     enabled: true,
   });
 
@@ -99,12 +102,14 @@ describe("api error mapping (BUGS 10.1, 10.2, 19.1)", () => {
     await repo.saveCheck(check("check_1", "Down"));
     await repo.saveIncident(
       new Incident({
-        id: "incident_ok",
+        id: "incident_ok" as IncidentId,
         targetId: targetId("target_api"),
         openedAt: new Date(100),
         status: "Open",
         reason: "Down",
         latestCheckId: "check_1",
+        summary: Option.none(),
+        closedAt: Option.none(),
       }),
     );
     const { baseUrl, close } = await serve(repo);

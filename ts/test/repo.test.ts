@@ -1,6 +1,6 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Effect, Option, Result } from "effect";
-import { CheckResult, Down, Incident, ResponseMetadata, Target, Up, targetId } from "../src/domain/schema.js";import { InMemoryCheckRepository } from "../src/repo/CheckRepository.js";
+import { Duration, Effect, Option, Result } from "effect";
+import { CheckResult, Down, Incident, ResponseMetadata, Target, Up, targetId, durationMillis, type CheckId, type IncidentId } from "../src/domain/schema.js";import { InMemoryCheckRepository } from "../src/repo/CheckRepository.js";
 import { RepositoryError } from "../src/domain/errors.js";
 import {
   SqliteCheckRepository,
@@ -10,12 +10,13 @@ import {
 
 const check = (id: string, tag: "Up" | "Down", at: number, duration: number | string = "1 ms") =>
   new CheckResult({
-    id,
+    id: id as CheckId,
     targetId: targetId("target_api"),
     checkedAt: new Date(at),
-    duration,
+    duration: typeof duration === "number" ? Duration.millis(duration) : Duration.millis(durationMillis(duration)),
     classification: tag === "Up" ? new Up() : new Down(),
-    response: new ResponseMetadata({ status: 200 }),
+    failure: Option.none(),
+    response: new ResponseMetadata({ status: Option.some(200), bytes: Option.none() }),
   });
 
 describe("in-memory repository", () => {
@@ -73,9 +74,9 @@ describe("sqlite repository", () => {
           url: "http://example.test",
           method: "GET",
           expectedStatus: [200],
-          interval: "10 ms",
-          timeout: "50 ms",
-          slowThreshold: "100 ms",
+          interval: Duration.millis(10),
+          timeout: Duration.millis(50),
+          slowThreshold: Duration.millis(100),
           enabled: true,
         });
       yield* Effect.tryPromise(() => repo.saveTarget(makeTarget("target_b")));
@@ -94,10 +95,10 @@ describe("sqlite repository", () => {
       yield* Effect.tryPromise(() => repo.saveCheck(whole));
       yield* Effect.tryPromise(() => repo.saveCheck(infinite));
       const rows = yield* Effect.tryPromise(() => repo.listChecks());
-      const byId = new Map(rows.map((c) => [c.id, c.duration]));
-      expect(byId.get("check_frac")).toBe(0.5);
-      expect(byId.get("check_whole")).toBe(42);
-      expect(byId.get("check_inf")).toBe(Number.POSITIVE_INFINITY);
+      const byId = new Map(rows.map((c) => [c.id, Duration.toMillis(c.duration)]));
+      expect(byId.get("check_frac" as CheckId)).toBe(0.5);
+      expect(byId.get("check_whole" as CheckId)).toBe(42);
+      expect(byId.get("check_inf" as CheckId)).toBe(Number.POSITIVE_INFINITY);
     }));
 
   it.effect("conflicting re-saves fail as repository errors", () =>
@@ -183,10 +184,17 @@ describe("incident validation", () => {
       status: "Open" as const,
       reason: "r",
       latestCheckId: "check_1",
+      summary: Option.none() as Option.Option<string>,
+      closedAt: Option.none() as Option.Option<Date>,
     };
-    expect(() => new Incident({ ...base, id: "nope" })).toThrow();
+    expect(() => new Incident({ ...base, id: "nope" as IncidentId })).toThrow();
     expect(() =>
-      new Incident({ ...base, id: "incident_ok", status: "Closed", closedAt: new Date(50) }),
+      new Incident({
+        ...base,
+        id: "incident_ok" as IncidentId,
+        status: "Closed",
+        closedAt: Option.some(new Date(50)),
+      }),
     ).toThrow();
   });
 });

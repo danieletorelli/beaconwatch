@@ -1,20 +1,20 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Effect, Option } from "effect";
-import { Target } from "../src/domain/schema.js";
+import { Duration, Effect, Option } from "effect";
+import { Target, type TargetId } from "../src/domain/schema.js";
 import { HttpProbeClient } from "../src/services/HttpProbeClient.js";
 import { probeOnce } from "../src/probe/ProbeProgram.js";
 import { mockTargetServer } from "./testkit/MockTargetServer.js";
 
 const target = (url: string, overrides: Partial<ConstructorParameters<typeof Target>[0]> = {}) =>
   new Target({
-    id: "target_api",
+    id: "target_api" as TargetId,
     name: "API",
     url,
     method: "GET",
-    expectedStatus: [200],
-    interval: "10 ms",
-    timeout: "2 seconds",
-    slowThreshold: "1 ms",
+    expectedStatus: [200] as [number, ...number[]],
+    interval: Duration.millis(10),
+    timeout: Duration.seconds(2),
+    slowThreshold: Duration.millis(1),
     enabled: true,
     ...overrides,
   });
@@ -25,7 +25,7 @@ describe("live HTTP probe client", () => {
       const { url } = yield* mockTargetServer;
       const client = new HttpProbeClient();
 
-      const ok = yield* probeOnce(target(`${url}/ok`, { slowThreshold: "10 seconds" }), client);
+      const ok = yield* probeOnce(target(`${url}/ok`, { slowThreshold: Duration.seconds(10) }), client);
       expect(ok.classification._tag).toBe("Up");
       expect(Option.getOrThrow(ok.response.bytes)).toBeGreaterThan(0);
 
@@ -34,12 +34,12 @@ describe("live HTTP probe client", () => {
       expect(Option.getOrThrow(badJson.failure).reason).toBe("InvalidBody");
 
       // A 500 is a permanent UnexpectedStatus: no retry budget is spent.
-      const flaky = yield* probeOnce(target(`${url}/flaky`, { slowThreshold: "10 seconds" }), client);
+      const flaky = yield* probeOnce(target(`${url}/flaky`, { slowThreshold: Duration.seconds(10) }), client);
       expect(flaky.classification._tag).toBe("Down");
       expect(Option.getOrThrow(flaky.failure).reason).toBe("UnexpectedStatus");
       expect(Option.getOrThrow(flaky.response.status)).toBe(500);
 
-      const notFound = yield* probeOnce(target(`${url}/missing`, { slowThreshold: "10 seconds" }), client);
+      const notFound = yield* probeOnce(target(`${url}/missing`, { slowThreshold: Duration.seconds(10) }), client);
       expect(notFound.classification._tag).toBe("Down");
       expect(Option.getOrThrow(notFound.failure).reason).toBe("UnexpectedStatus");
     }));
@@ -48,7 +48,7 @@ describe("live HTTP probe client", () => {
     Effect.gen(function*() {
       const { url } = yield* mockTargetServer;
       const client = new HttpProbeClient();
-      const text = yield* probeOnce(target(`${url}/slow`, { slowThreshold: "10 seconds" }), client);
+      const text = yield* probeOnce(target(`${url}/slow`, { slowThreshold: Duration.seconds(10) }), client);
       // The mock /slow path answers 200 text/plain after ~50 ms; the probe
       // requires valid JSON bodies, so the check records InvalidBody.
       expect(text.classification._tag).toBe("InvalidResponse");
@@ -60,7 +60,7 @@ describe("live HTTP probe client", () => {
       const { url } = yield* mockTargetServer;
       const client = new HttpProbeClient();
       const head = yield* probeOnce(
-        target(`${url}/ok`, { method: "HEAD", slowThreshold: "10 seconds" }),
+        target(`${url}/ok`, { method: "HEAD", slowThreshold: Duration.seconds(10) }),
         client,
       );
       expect(head.classification._tag).toBe("Up");
@@ -80,7 +80,7 @@ describe("live HTTP probe client", () => {
     Effect.gen(function*() {
       const { url, lastAccept } = yield* mockTargetServer;
       const client = new HttpProbeClient();
-      yield* probeOnce(target(`${url}/ok`, { slowThreshold: "10 seconds" }), client);
+      yield* probeOnce(target(`${url}/ok`, { slowThreshold: Duration.seconds(10) }), client);
       expect(lastAccept.value).toBe("application/json");
     }));
 
@@ -88,7 +88,7 @@ describe("live HTTP probe client", () => {
     Effect.gen(function*() {
       const { url } = yield* mockTargetServer;
       const client = new HttpProbeClient();
-      const check = yield* probeOnce(target(`${url}/slow`, { timeout: "30 ms" }), client);
+      const check = yield* probeOnce(target(`${url}/slow`, { timeout: Duration.millis(30) }), client);
       expect(check.classification._tag).toBe("Down");
       expect(Option.getOrThrow(check.failure).reason).toBe("TimeoutError");
     }));

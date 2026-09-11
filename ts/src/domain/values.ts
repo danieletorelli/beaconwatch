@@ -1,4 +1,4 @@
-import { Equal, Option, Result } from "effect";
+import { Duration, Equal, Option, Result } from "effect";
 import {
   InvalidBody,
   TimeoutError,
@@ -111,6 +111,8 @@ export const classifyProbe = (i: {
       }),
     );
   return Result.succeed(
-    i.duration > i.target.slowThreshold ? new Slow() : new Up(),
+    Duration.isGreaterThan(Duration.millis(i.duration), i.target.slowThreshold)
+      ? new Slow()
+      : new Up(),
   );
 };

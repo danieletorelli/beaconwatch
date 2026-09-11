@@ -1,7 +1,11 @@
-import { Effect, Option, Schema } from "effect";
+import { Duration, Effect, Option, Schema, SchemaGetter } from "effect";
+import type * as Brand from "effect/Brand";
 import { ValidationError } from "./errors.js";
 
-export type TargetId = string & { readonly __brand: "TargetId" };
+export type TargetId = string & Brand.Brand<"TargetId">;
+export type CheckId = string & Brand.Brand<"CheckId">;
+export type IncidentId = string & Brand.Brand<"IncidentId">;
+export type HttpMethod = "GET" | "POST" | "HEAD";
 export type DurationInput = number | string;
 
 export const durationMillis = (input: DurationInput): number => {
@@ -25,256 +29,196 @@ export const targetId = (value: unknown): TargetId => {
     throw new ValidationError({ field: "targetId", reason: "invalid target id" });
   return value as TargetId;
 };
+
+// ---------- Shared field schemas (module 11): the single validation source.
+
 // Well-formed Unicode: no unpaired surrogates (TextEncoder replaces them).
-const wellFormedUnicode = (s: string) =>
+const isWellFormed = (s: string) =>
   new TextDecoder().decode(new TextEncoder().encode(s)) === s;
-const validTimestamp = (d: Date, field: string) => {
-  if (Number.isNaN(d.getTime()))
-    throw new ValidationError({ field, reason: "invalid timestamp" });
-  const year = d.getUTCFullYear();
-  if (year < 1 || year > 9999)
-    throw new ValidationError({ field, reason: "timestamp year must be 0001-9999" });
-  return d;
-};
-export type HttpMethod = "GET" | "POST" | "HEAD";
-export interface TargetConfigInput {
-  id: string;
-  name: string;
-  url: string;
-  method: HttpMethod;
-  expectedStatus: readonly number[];
-  interval: DurationInput;
-  timeout: DurationInput;
-  slowThreshold: DurationInput;
-  healthBodySchema?: string;
-  tags?: readonly string[];
-}
-// Shared target-config boundary schema: the single source for the decoder,
-// the class constructor's own checks, and the JSON Schema artifact so the
-// three encodings can never disagree (module 11).
-const positiveDuration = Schema.makeFilter((d: number | string) => {
-  try {
-    return durationMillis(d) > 0 ? undefined : "duration must be positive";
-  } catch {
-    return "duration must be positive";
-  }
-});
-export const TargetConfigSchema = Schema.Struct({
-  id: Schema.String.check(Schema.isPattern(/^target_[a-z0-9][a-z0-9_-]*$/)),
-  name: Schema.String,
-  url: Schema.String,
+export const WellFormedString = Schema.String.check(
+  Schema.makeFilter((s: string) =>
+    isWellFormed(s) ? undefined : "must be well-formed Unicode",
+  ),
+);
+
+// Timestamps: valid calendar instants with a UTC year of 0001 through 9999.
+export const AcceptedDate = Schema.instanceOf(globalThis.Date).check(
+  Schema.makeFilter((d: Date) => {
+    if (Number.isNaN(d.getTime())) return "invalid timestamp";
+    const year = d.getUTCFullYear();
+    return year >= 1 && year <= 9999 ? undefined : "timestamp year must be 0001-9999";
+  }),
+);
+
+// Durations: bare numbers are milliseconds, unit strings use their unit;
+// strictly positive, with positive infinity satisfying the boundary.
+export const PositiveDuration = Schema.Union([
+  Schema.DurationFromMillis,
+  Schema.DurationFromString,
+]).check(
+  Schema.makeFilter((d: Duration.Duration) =>
+    Duration.match({
+      onMillis: (m) => m > 0,
+      onNanos: (n) => n > 0n,
+      onInfinity: () => true,
+      onNegativeInfinity: () => false,
+    })(d)
+      ? undefined
+      : "duration must be positive",
+  ),
+);
+
+// Names are trimmed non-empty strings; urls must be lexical http(s) urls.
+export const TargetName = Schema.String.pipe(
+  Schema.decodeTo(Schema.String, {
+    decode: SchemaGetter.transform((s: string) => {
+      const trimmed = s.trim();
+      if (trimmed.length === 0) throw new Error("name must not be empty");
+      return trimmed;
+    }),
+    encode: SchemaGetter.transform((s: string) => s),
+  }),
+);
+export const HttpUrl = Schema.String.check(
+  Schema.makeFilter((s: string) => {
+    try {
+      const url = new URL(s);
+      return /^https?:$/.test(url.protocol) && url.hostname
+        ? undefined
+        : "invalid URL";
+    } catch {
+      return "invalid URL";
+    }
+  }),
+);
+
+const CheckIdField = WellFormedString.pipe(Schema.brand("CheckId"));
+const IncidentIdField = WellFormedString.pipe(Schema.brand("IncidentId"));
+const TargetIdField = Schema.String.check(
+  Schema.isPattern(/^target_[a-z0-9][a-z0-9_-]*$/),
+).pipe(Schema.brand("TargetId"));
+
+// ---------- Classifications.
+
+export class Up extends Schema.TaggedClass<Up>()("Up", {}) {}
+export class Slow extends Schema.TaggedClass<Slow>()("Slow", {}) {}
+export class Down extends Schema.TaggedClass<Down>()("Down", {}) {}
+export class InvalidResponse extends Schema.TaggedClass<InvalidResponse>()(
+  "InvalidResponse",
+  {},
+) {}
+export class Unknown extends Schema.TaggedClass<Unknown>()("Unknown", {}) {}
+export type Classification = Up | Slow | Down | InvalidResponse | Unknown;
+
+// ---------- Check envelope.
+
+export class CheckFailure extends Schema.TaggedClass<CheckFailure>()(
+  "CheckFailure",
+  { reason: WellFormedString },
+) {}
+
+export class ResponseMetadata extends Schema.Class<ResponseMetadata>(
+  "ResponseMetadata",
+)({
+  status: Schema.OptionFromOptionalKey(
+    Schema.Int.check(Schema.isBetween({ minimum: 100, maximum: 599 })),
+  ),
+  bytes: Schema.OptionFromOptionalKey(
+    Schema.Int.check(
+      Schema.isGreaterThanOrEqualTo(0),
+    ),
+  ),
+}) {}
+
+export class CheckResult extends Schema.Class<CheckResult>("CheckResult")({
+  id: CheckIdField,
+  targetId: TargetIdField,
+  checkedAt: AcceptedDate,
+  duration: PositiveDuration,
+  classification: Schema.Union([Up, Slow, Down, InvalidResponse, Unknown]),
+  failure: Schema.OptionFromOptionalKey(CheckFailure),
+  response: ResponseMetadata,
+}) {}
+
+// ---------- Targets.
+
+export class TargetConfig extends Schema.Class<TargetConfig>("TargetConfig")({
+  id: TargetIdField,
+  name: TargetName,
+  url: HttpUrl,
   method: Schema.Literals(["GET", "POST", "HEAD"]),
   expectedStatus: Schema.NonEmptyArray(
     Schema.Int.check(Schema.isBetween({ minimum: 100, maximum: 599 })),
   ),
-  interval: Schema.Union([Schema.Number, Schema.String]).check(positiveDuration),
-  timeout: Schema.Union([Schema.Number, Schema.String]).check(positiveDuration),
-  slowThreshold: Schema.Union([Schema.Number, Schema.String]).check(positiveDuration),
+  interval: PositiveDuration,
+  timeout: PositiveDuration,
+  slowThreshold: PositiveDuration,
   healthBodySchema: Schema.optionalKey(Schema.String),
   tags: Schema.optionalKey(Schema.Array(Schema.String)),
-});
-const TargetConfigInputSchema = TargetConfigSchema;
-export class TargetConfig {
-  readonly id: TargetId;
-  readonly name: string;
-  readonly url: string;
-  readonly method: HttpMethod;
-  readonly expectedStatus: readonly number[];
-  readonly interval: number;
-  readonly timeout: number;
-  readonly slowThreshold: number;
-  readonly healthBodySchema?: string;
-  readonly tags?: readonly string[];
-  constructor(input: TargetConfigInput) {
-    this.id = targetId(input.id);
-    this.name = input.name.trim();
-    if (!this.name) throw new ValidationError({ field: "name", reason: "empty name" });
-    const url = new URL(input.url);
-    if (!/https?:/.test(url.protocol) || !url.hostname)
-      throw new ValidationError({ field: "url", reason: "invalid URL" });
-    this.url = input.url;
-    if (!["GET", "POST", "HEAD"].includes(input.method))
-      throw new ValidationError({ field: "method", reason: "invalid method" });
-    this.method = input.method;
-    if (
-      !input.expectedStatus.length ||
-      input.expectedStatus.some(
-        (x) => !Number.isInteger(x) || x < 100 || x > 599,
-      )
-    )
-      throw new ValidationError({ field: "expectedStatus", reason: "invalid statuses" });
-    this.expectedStatus = [...input.expectedStatus];
-    this.interval = positive(input.interval);
-    this.timeout = positive(input.timeout);
-    this.slowThreshold = positive(input.slowThreshold);
-    if (input.healthBodySchema !== undefined)
-      this.healthBodySchema = input.healthBodySchema;
-    if (input.tags !== undefined) this.tags = [...input.tags];
-  }
-}
-export class Target extends TargetConfig {
-  readonly enabled: boolean;
-  constructor(input: TargetConfigInput & { enabled: boolean }) {
-    super(input);
-    this.enabled = input.enabled;
-  }
-}
-const positive = (d: DurationInput) => {
-  const n = durationMillis(d);
-  // Strictly positive: positive infinity satisfies the boundary (it can only
-  // reach here through the tagged-infinity persistence decode); NaN, negative
-  // infinity, zero, and negatives are rejected.
-  if (!(n > 0))
-    throw new ValidationError({ field: "duration", reason: "duration must be positive" });
-  return n;
-};
+}) {}
 
-export class Up {
-  readonly _tag = "Up";
-}
-export class Slow {
-  readonly _tag = "Slow";
-}
-export class Down {
-  readonly _tag = "Down";
-}
-export class InvalidResponse {
-  readonly _tag = "InvalidResponse";
-}
-export class Unknown {
-  readonly _tag = "Unknown";
-}
-export type Classification = Up | Slow | Down | InvalidResponse | Unknown;
-export class CheckFailure {
-  readonly _tag = "CheckFailure";
-  readonly reason: string;
-  constructor(input: { reason: string }) {
-    this.reason = input.reason;
-    Object.freeze(this);
-  }
-}
-export class ResponseMetadata {
-  readonly status: Option.Option<number>;
-  readonly bytes: Option.Option<number>;
-  constructor(input: { status?: number; bytes?: number }) {
-    if (input.status !== undefined) {
-      if (
-        !Number.isInteger(input.status) ||
-        input.status < 100 ||
-        input.status > 599
-      )
-        throw new ValidationError({ field: "status", reason: "invalid status" });
-      this.status = Option.some(input.status);
-    } else {
-      this.status = Option.none();
-    }
-    if (input.bytes !== undefined) {
-      if (!Number.isSafeInteger(input.bytes) || input.bytes < 0)
-        throw new ValidationError({ field: "bytes", reason: "invalid bytes" });
-      this.bytes = Option.some(input.bytes);
-    } else {
-      this.bytes = Option.none();
-    }
-    Object.freeze(this);
-  }
-}
-export class CheckResult {
-  readonly id: string;
-  readonly targetId: TargetId;
-  readonly checkedAt: Date;
-  readonly duration: number;
-  readonly classification: Classification;
-  readonly failure: Option.Option<CheckFailure>;
-  readonly response: ResponseMetadata;
-  constructor(input: {
-    id: string;
-    targetId: TargetId;
-    checkedAt: Date;
-    duration: DurationInput;
-    classification: Classification;
-    failure?: CheckFailure;
-    response: ResponseMetadata;
-  }) {
-    if (!wellFormedUnicode(input.id))
-      throw new ValidationError({ field: "id", reason: "check id must be well-formed Unicode" });
-    this.id = input.id;
-    this.targetId = targetId(input.targetId);
-    this.checkedAt = validTimestamp(new Date(input.checkedAt), "checkedAt");
-    this.duration = positive(input.duration);
-    this.classification = input.classification;
-    if (input.failure !== undefined && !wellFormedUnicode(input.failure.reason))
-      throw new ValidationError({ field: "failure", reason: "failure reason must be well-formed Unicode" });
-    this.failure = input.failure !== undefined ? Option.some(input.failure) : Option.none();
-    this.response = input.response;
-    Object.freeze(this);
-  }
-}
-export class Incident {
-  readonly id: string;
-  readonly targetId: TargetId;
-  readonly openedAt: Date;
-  readonly closedAt: Option.Option<Date>;
-  readonly status: "Open" | "Closed";
-  readonly reason: string;
-  readonly latestCheckId: string;
-  readonly summary: Option.Option<string>;
-  constructor(input: {
-    id: string;
-    targetId: TargetId;
-    openedAt: Date;
-    closedAt?: Date;
-    status: "Open" | "Closed";
-    reason: string;
-    latestCheckId: string;
-    summary?: string;
-  }) {
-    if (typeof input.id !== "string" || !/^incident_[a-z0-9][a-z0-9_-]*$/.test(input.id))
-      throw new ValidationError({ field: "id", reason: "invalid incident id" });
-    this.id = input.id;
-    this.targetId = targetId(input.targetId);
-    this.openedAt = validTimestamp(new Date(input.openedAt), "openedAt");
-    this.status = input.status;
-    if (input.status !== "Open" && input.status !== "Closed")
-      throw new ValidationError({ field: "status", reason: "invalid incident status" });
-    if (!wellFormedUnicode(input.reason))
-      throw new ValidationError({ field: "reason", reason: "reason must be well-formed Unicode" });
-    if (!wellFormedUnicode(input.latestCheckId))
-      throw new ValidationError({ field: "latestCheckId", reason: "latestCheckId must be well-formed Unicode" });
-    if (input.summary !== undefined && !wellFormedUnicode(input.summary))
-      throw new ValidationError({ field: "summary", reason: "summary must be well-formed Unicode" });
-    this.reason = input.reason;
-    this.latestCheckId = input.latestCheckId;
-    this.closedAt =
-      input.closedAt !== undefined
-        ? Option.some(validTimestamp(new Date(input.closedAt), "closedAt"))
-        : Option.none();
-    this.summary = input.summary !== undefined ? Option.some(input.summary) : Option.none();
-    if (this.status === "Open" && Option.isSome(this.closedAt))
-      throw new ValidationError({ field: "incident", reason: "open incident has close time" });
-    if (this.status === "Closed" && Option.isNone(this.closedAt))
-      throw new ValidationError({ field: "incident", reason: "closed incident lacks close time" });
-    if (Option.isSome(this.closedAt) && this.closedAt.value < this.openedAt)
-      throw new ValidationError({ field: "incident", reason: "close before open" });
-    Object.freeze(this);
-  }
-}
-export const decodeTargetConfig = (input: unknown): Effect.Effect<TargetConfig, Schema.SchemaError> =>
-  Schema.decodeUnknownEffect(TargetConfigInputSchema)(input).pipe(
-    Effect.map((decoded) => new TargetConfig(decoded))
-  );
+export class Target extends TargetConfig.extend<Target>("Target")({
+  enabled: Schema.Boolean,
+}) {}
+
+// ---------- Incidents.
+
+const incidentWindows = Schema.makeFilter(
+  (
+    i: {
+      readonly status: "Open" | "Closed";
+      readonly openedAt: Date;
+      readonly closedAt: Option.Option<Date>;
+    },
+  ) => {
+    if (i.status === "Open" && Option.isSome(i.closedAt))
+      return "open incident has close time";
+    if (i.status === "Closed" && Option.isNone(i.closedAt))
+      return "closed incident lacks close time";
+    if (Option.isSome(i.closedAt) && i.closedAt.value < i.openedAt)
+      return "close before open";
+    return undefined;
+  },
+);
+const IncidentStruct = Schema.Struct({
+  id: IncidentIdField.check(
+    Schema.makeFilter((s: string) =>
+      /^incident_[a-z0-9][a-z0-9_-]*$/.test(s) ? undefined : "invalid incident id",
+    ),
+  ),
+  targetId: TargetIdField,
+  openedAt: AcceptedDate,
+  status: Schema.Literals(["Open", "Closed"]),
+  reason: WellFormedString,
+  latestCheckId: WellFormedString,
+  summary: Schema.OptionFromOptionalKey(WellFormedString),
+  closedAt: Schema.OptionFromOptionalKey(AcceptedDate),
+}).check(incidentWindows);
+export class Incident extends Schema.Class<Incident>("Incident")(IncidentStruct) {}
+
+// ---------- Boundary decode.
+
+export const TargetConfigSchema = TargetConfig;
+export const decodeTargetConfig = (
+  input: unknown,
+): Effect.Effect<TargetConfig, Schema.SchemaError> =>
+  Schema.decodeUnknownEffect(TargetConfig)(input);
+
+// ---------- Structural copies (immutable replacement).
+
 export const cloneCheck = (c: CheckResult) =>
   new CheckResult({
     id: c.id,
     targetId: c.targetId,
     checkedAt: new Date(c.checkedAt),
     duration: c.duration,
-    classification: new ({ Up, Slow, Down, InvalidResponse, Unknown } as const)[
-      c.classification._tag
-    ](),
-    ...(Option.isSome(c.failure) ? { failure: new CheckFailure(c.failure.value) } : {}),
+    classification: c.classification,
+    failure: Option.isSome(c.failure)
+      ? Option.some(new CheckFailure({ reason: c.failure.value.reason }))
+      : Option.none(),
     response: new ResponseMetadata({
-      ...(Option.isSome(c.response.status) ? { status: c.response.status.value } : {}),
-      ...(Option.isSome(c.response.bytes) ? { bytes: c.response.bytes.value } : {}),
+      status: c.response.status,
+      bytes: c.response.bytes,
     }),
   });
 export const cloneIncident = (i: Incident) =>
@@ -285,8 +229,10 @@ export const cloneIncident = (i: Incident) =>
     status: i.status,
     reason: i.reason,
     latestCheckId: i.latestCheckId,
-    ...(Option.isSome(i.closedAt) ? { closedAt: new Date(i.closedAt.value) } : {}),
-    ...(Option.isSome(i.summary) ? { summary: i.summary.value } : {}),
+    summary: i.summary,
+    closedAt: Option.isSome(i.closedAt)
+      ? Option.some(new Date(i.closedAt.value))
+      : Option.none(),
   });
 export const cloneTarget = (t: Target) =>
   new Target({

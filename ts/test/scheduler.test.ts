@@ -1,7 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Effect, Exit, Fiber, Layer, Metric, Option, Result } from "effect";
+import { Duration, Effect, Exit, Fiber, Layer, Metric, Option, Result } from "effect";
 import { TestClock } from "effect/testing";
-import { Target, CheckResult, Down, ResponseMetadata, Up, targetId } from "../src/domain/schema.js";
+import { Target, CheckResult, Down, ResponseMetadata, Up, targetId, type CheckId, type TargetId } from "../src/domain/schema.js";
 import { InvalidBody } from "../src/domain/errors.js";
 import {
   activeProbeGauge,
@@ -17,26 +17,27 @@ import { runOnceEffect, watchLoopEffect } from "../src/watch/Scheduler.js";
 
 const target = (overrides: Partial<ConstructorParameters<typeof Target>[0]> = {}) =>
   new Target({
-    id: "target_api",
+    id: "target_api" as TargetId,
     name: "API",
     url: "http://example.test",
     method: "GET",
-    expectedStatus: [200],
-    interval: "10 ms",
-    timeout: "50 ms",
-    slowThreshold: "100 ms",
+    expectedStatus: [200] as [number, ...number[]],
+    interval: Duration.millis(10),
+    timeout: Duration.millis(50),
+    slowThreshold: Duration.millis(100),
     enabled: true,
     ...overrides,
   });
 
 const checkLike = (tag: "Up" | "Down") =>
   new CheckResult({
-    id: "check_t",
-    targetId: targetId("target_api"),
+    id: "check_t" as CheckId,
+    targetId: targetId("target_api") as TargetId,
     checkedAt: new Date(0),
-    duration: 7,
+    duration: Duration.millis(7),
     classification: tag === "Up" ? new Up() : new Down(),
-    response: new ResponseMetadata({ status: 200 }),
+    failure: Option.none(),
+    response: new ResponseMetadata({ status: Option.some(200), bytes: Option.none() }),
   });
 
 const wired = (
@@ -71,7 +72,7 @@ describe("scheduler", () => {
     Effect.gen(function*() {
       const repo = new InMemoryCheckRepository();
       yield* runOnceEffect(
-        [target(), target({ enabled: false, id: "target_off" })],
+        [target(), target({ enabled: false, id: "target_off" as TargetId })],
         { queueCapacity: 8, workerCount: 2 },
       ).pipe(Effect.provide(wired(repo, { target_api: valid() })));
       const checks = yield* Effect.tryPromise(() => repo.listChecks());
@@ -102,7 +103,7 @@ describe("scheduler", () => {
   it.effect("watchLoop repeats each target at its own interval", () =>
     Effect.gen(function*() {
       const repo = new InMemoryCheckRepository();
-      const loop = watchLoopEffect([target({ interval: "50 ms" })], {
+      const loop = watchLoopEffect([target({ interval: Duration.millis(50) })], {
         queueCapacity: 8,
         workerCount: 1,
       }).pipe(Effect.provide(wired(repo, { target_api: valid() })));

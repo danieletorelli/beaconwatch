@@ -1,17 +1,18 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Effect, Fiber, Option, Result } from "effect";
+import { Duration, Effect, Fiber, Option, Result } from "effect";
 import { TestClock } from "effect/testing";
-import { CheckResult, ResponseMetadata, Target, Up, targetId } from "../src/domain/schema.js";
+import { CheckResult, ResponseMetadata, Up, targetId, type CheckId } from "../src/domain/schema.js";
 import { ReadinessEffect, StatusState, StatusStateLayer } from "../src/watch/StatusState.js";
 
 const check = (id: string, at: number, target = "target_api") =>
   new CheckResult({
-    id,
+    id: id as CheckId,
     targetId: targetId(target),
     checkedAt: new Date(at),
-    duration: "1 ms",
+    duration: Duration.millis(1),
     classification: new Up(),
-    response: new ResponseMetadata({ status: 200 }),
+    failure: Option.none(),
+    response: new ResponseMetadata({ status: Option.some(200), bytes: Option.none() }),
   });
 
 const program = Effect.gen(function*() {

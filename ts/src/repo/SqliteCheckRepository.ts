@@ -1,4 +1,4 @@
-import { Option } from "effect";
+import { Duration, Option, Schema } from "effect";
 import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -29,15 +29,16 @@ type Row = Record<string, unknown>;
 // Versioned duration codec: legacy numeric millisecond values plus tagged
 // millisecond/nanosecond and infinity encodings (SPEC 4.1). Unknown tags fail
 // as repository errors.
-const decodeDuration = (x: unknown): number => {
-  if (typeof x === "number") return x;
+const decodeDuration = (x: unknown): Duration.Duration => {
+  if (typeof x === "number") return Duration.millis(x);
   if (x !== null && typeof x === "object" && "tag" in x) {
     const t = x as { tag: unknown; millis?: unknown; nanos?: unknown; direction?: unknown };
-    if (t.tag === "millis" && typeof t.millis === "number") return t.millis;
-    if (t.tag === "nanos" && Number.isSafeInteger(t.nanos)) return (t.nanos as number) / 1_000_000;
+    if (t.tag === "millis" && typeof t.millis === "number") return Duration.millis(t.millis);
+    if (t.tag === "nanos" && Number.isSafeInteger(t.nanos))
+      return Duration.nanos(BigInt(t.nanos as number));
     if (t.tag === "infinity") {
-      if (t.direction === "positive") return Number.POSITIVE_INFINITY;
-      if (t.direction === "negative") return Number.NEGATIVE_INFINITY;
+      if (t.direction === "positive") return Duration.infinity;
+      if (t.direction === "negative") return Duration.negativeInfinity;
     }
   }
   throw new RepositoryError({
@@ -45,16 +46,21 @@ const decodeDuration = (x: unknown): number => {
     cause: `unknown duration encoding: ${JSON.stringify(x)}`,
   });
 };
-const encodeDuration = (n: number): number | Record<string, unknown> => {
-  if (n === Number.POSITIVE_INFINITY) return { tag: "infinity", direction: "positive" };
-  if (Number.isInteger(n)) return n;
-  const nanos = n * 1_000_000;
-  if (Number.isSafeInteger(nanos)) return { tag: "nanos", nanos };
-  throw new RepositoryError({
-    operation: "saveCheck",
-    cause: `duration ${String(n)} is not representable`,
-  });
-};
+const encodeDuration = (d: Duration.Duration): number | Record<string, unknown> =>
+  Duration.match({
+    onMillis: (millis) => (Number.isInteger(millis) ? millis : { tag: "nanos", nanos: millis * 1_000_000 }),
+    onNanos: (nanos) => {
+      const asMillis = Number(nanos) / 1_000_000;
+      if (!Number.isFinite(asMillis))
+        throw new RepositoryError({
+          operation: "saveCheck",
+          cause: `duration ${String(nanos)} nanos is not representable`,
+        });
+      return Number.isInteger(asMillis) ? asMillis : { tag: "nanos", nanos: Number(nanos) };
+    },
+    onInfinity: () => ({ tag: "infinity", direction: "positive" }),
+    onNegativeInfinity: () => ({ tag: "infinity", direction: "negative" }),
+  })(d);
 export const makeTempFilename = () =>
   join(
     tmpdir(),
@@ -76,12 +82,14 @@ export class SqliteCheckRepository implements CheckRepositoryShape {
     );
   }
   private target(s: string) {
-    const x = JSON.parse(s) as ConstructorParameters<typeof Target>[0];
-    return new Target(x);
+    // Targets persist in their schema-encoded form; decoding validates.
+    return Schema.decodeUnknownSync(Target)(JSON.parse(s));
   }
   private check(s: string) {
     try {
-      // Persisted shape: Option fields appear as Some/None wrappers.
+      // Persisted shape: Option fields appear as Some/None wrappers. They are
+      // normalized to the clean encoded shape here; the CheckResult schema
+      // then performs the full decode (brands, durations, dates).
       const x = JSON.parse(s) as {
         id: string;
         targetId: string;
@@ -94,23 +102,27 @@ export class SqliteCheckRepository implements CheckRepositoryShape {
           bytes?: { _tag: string; value?: number };
         };
       };
-      // Serialized Option wrappers are unwrapped here, so a decoded check has
-      // exactly the contents it was saved with.
-      const { failure, ...rest } = x;
       return new CheckResult({
-        ...rest,
-        targetId: targetId(rest.targetId),
-        duration: decodeDuration(rest.duration),
-        checkedAt: new Date(rest.checkedAt),
+        id: x.id as never,
+        targetId: targetId(x.targetId),
+        checkedAt: new Date(x.checkedAt),
+        duration: decodeDuration(x.duration),
         classification: new classes[
-          rest.classification._tag as keyof typeof classes
+          x.classification._tag as keyof typeof classes
         ](),
-        ...(failure?._tag === "Some" && failure.value
-          ? { failure: new CheckFailure({ reason: failure.value.reason }) }
-          : {}),
+        failure:
+          x.failure?._tag === "Some" && x.failure.value
+            ? Option.some(new CheckFailure({ reason: x.failure.value.reason }))
+            : Option.none(),
         response: new ResponseMetadata({
-          ...(x.response?.status?._tag === "Some" ? { status: x.response.status.value } : {}),
-          ...(x.response?.bytes?._tag === "Some" ? { bytes: x.response.bytes.value } : {}),
+          status:
+            x.response?.status?._tag === "Some"
+              ? Option.some(x.response.status.value!)
+              : Option.none(),
+          bytes:
+            x.response?.bytes?._tag === "Some"
+              ? Option.some(x.response.bytes.value!)
+              : Option.none(),
         }),
       });
     } catch (e) {
@@ -119,16 +131,31 @@ export class SqliteCheckRepository implements CheckRepositoryShape {
   }
   private incident(s: string) {
     try {
-      const x = JSON.parse(s);
+      const x = JSON.parse(s) as {
+        id: string;
+        targetId: string;
+        openedAt: string;
+        status: "Open" | "Closed";
+        reason: string;
+        latestCheckId: string;
+        summary?: { _tag: string; value?: string };
+        closedAt?: { _tag: string; value?: string | number };
+      };
       return new Incident({
-        id: x.id,
-        targetId: x.targetId,
+        id: x.id as never,
+        targetId: targetId(x.targetId),
         openedAt: new Date(x.openedAt),
         status: x.status,
         reason: x.reason,
         latestCheckId: x.latestCheckId,
-        ...(x.closedAt?._tag === "Some" ? { closedAt: new Date(x.closedAt.value) } : {}),
-        ...(x.summary?._tag === "Some" ? { summary: x.summary.value } : {}),
+        summary:
+          x.summary?._tag === "Some"
+            ? Option.some(x.summary.value!)
+            : Option.none(),
+        closedAt:
+          x.closedAt?._tag === "Some"
+            ? Option.some(new Date(x.closedAt.value as string))
+            : Option.none(),
       });
     } catch (e) {
       throw new RepositoryError({ operation: "incident", cause: e });
@@ -139,7 +166,7 @@ export class SqliteCheckRepository implements CheckRepositoryShape {
       .prepare(
         "insert into targets values(?,?) on conflict(id) do update set json=excluded.json",
       )
-      .run(t.id, JSON.stringify(t));
+      .run(t.id, JSON.stringify(Schema.encodeSync(Target)(t)));
   }
   async listTargets() {
     return (
