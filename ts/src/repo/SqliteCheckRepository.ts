@@ -263,7 +263,11 @@ const makeRepo = (
             check: c,
             now,
           });
-          yield* sql`insert into checks (id, json) values (${c.id}, ${encodeCheck(c)})`;
+          const encoded = yield* Effect.try({
+            try: () => encodeCheck(c),
+            catch: (e) => e instanceof RepositoryError ? e : repoError("encodeCheck")(e),
+          });
+          yield* sql`insert into checks (id, json) values (${c.id}, ${encoded})`;
           for (const incident of outcome.incidents)
             yield* sql`insert into incidents (id, json) values (${incident.id}, ${encodeIncident(incident)}) on conflict(id) do update set json = excluded.json`;
           const eventIds: number[] = [];

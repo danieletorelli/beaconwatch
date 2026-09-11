@@ -44,3 +44,35 @@ describe("application configuration (module 10)", () => {
       void ConfigError;
     }));
 });
+
+describe("configuration boundaries (contract 8)", () => {
+  it.effect("accepts positive nanosecond durations", () =>
+    Effect.gen(function*() {
+      const config = yield* read({
+        pollInterval: "500 nanos",
+        probeTimeout: "250 nanos",
+        slowThreshold: "100 nanos",
+        workerConcurrency: "1",
+      });
+      expect(config.workerConcurrency).toBe(1);
+    }));
+
+  it.effect("maps missing and malformed values to a domain ConfigError", () =>
+    Effect.gen(function*() {
+      const missing = yield* Effect.result(
+        Effect.provide(
+          Effect.mapError(appConfig, (e) => e),
+          testConfigLayer({ workerConcurrency: "abc" }),
+        ),
+      );
+      expect(missing._tag === "Failure" && missing.failure._tag === "ConfigError").toBe(true);
+    }));
+
+  it.effect("accepts the worker maximum and rejects max plus one", () =>
+    Effect.gen(function*() {
+      const atMax = yield* read({ workerConcurrency: "1024" });
+      expect(atMax.workerConcurrency).toBe(1024);
+      const overMax = yield* Effect.result(read({ workerConcurrency: "1025" }));
+      expect(overMax._tag === "Failure" && overMax.failure._tag === "ConfigError").toBe(true);
+    }));
+});

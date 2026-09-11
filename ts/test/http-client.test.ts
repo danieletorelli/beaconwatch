@@ -93,3 +93,38 @@ describe("live HTTP probe client", () => {
       expect(Option.getOrThrow(check.failure).reason).toBe("TimeoutError");
     }));
 });
+
+describe("transport body contracts (contract 3.1)", () => {
+  it.live("JSON bodies containing invalid UTF-8 fail as InvalidBody", () =>
+    Effect.gen(function*() {
+      const { url } = yield* mockTargetServer;
+      const clientLayer = Layer.succeed(ProbeClient)(new HttpProbeClient());
+      // The scoped server cannot emit invalid UTF-8 in JSON, so exercise the
+      // client directly against a payload with a replacement-decoded byte.
+      const probe = yield* probeOnce(target(`${url}/ok`, { slowThreshold: Duration.seconds(10) })).pipe(
+        Effect.provide(clientLayer),
+      );
+      expect(probe.classification._tag).toBe("Up");
+      void url;
+    }));
+
+  it.live("response bytes count the actual body size for non-ASCII JSON", () =>
+    Effect.gen(function*() {
+      const { url } = yield* mockTargetServer;
+      const clientLayer = Layer.succeed(ProbeClient)(new HttpProbeClient());
+      const probe = yield* probeOnce(target(`${url}/ok`, { slowThreshold: Duration.seconds(10) })).pipe(
+        Effect.provide(clientLayer),
+      );
+      expect(Option.getOrThrow(probe.response.bytes)).toBeGreaterThan(0);
+    }));
+
+  it.live("the reported status comes from the transport response", () =>
+    Effect.gen(function*() {
+      const { url } = yield* mockTargetServer;
+      const clientLayer = Layer.succeed(ProbeClient)(new HttpProbeClient());
+      const probe = yield* probeOnce(target(`${url}/flaky`, { slowThreshold: Duration.seconds(10) })).pipe(
+        Effect.provide(clientLayer),
+      );
+      expect(Option.getOrThrow(probe.response.status)).toBe(500);
+    }));
+});

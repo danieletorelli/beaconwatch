@@ -369,3 +369,36 @@ describe("schema boundary contracts (contract 2.1-2.2)", () => {
     expect(Duration.toMillis(clone.duration)).toBe(1500);
   });
 });
+
+describe("summarizer contracts (contract 3.2)", () => {
+  it("surfaces schema-invalid output as a typed error and preserves the 1-240 limit", async () => {
+    const mod = await import("../src/services/IncidentSummarizer.js");
+    const fakeSummary = mod.Fake;
+    const IncidentSummaryError = mod.IncidentSummaryError;
+    await expect(fakeSummary("schema-invalid" as never).summarize([])).rejects.toBeInstanceOf(
+      IncidentSummaryError,
+    );
+    const happy = await fakeSummary().summarize([]);
+    expect(happy.text.length).toBeGreaterThanOrEqual(1);
+    expect(happy.text.length).toBeLessThanOrEqual(240);
+  });
+});
+
+describe("testkit lifecycle (contract 12)", () => {
+  it("starts and finalizes a scoped local server", async () => {
+    const { startServer } = await import("../src/http/server.js");
+    const { server, baseUrl } = await startServer({
+      saveTarget: () => Effect.void,
+      listTargets: () => Effect.succeed([]),
+      saveCheck: () => Effect.void,
+      listChecks: () => Effect.succeed([]),
+      getIncident: () => Effect.succeed(Option.none()),
+      getOpenIncident: () => Effect.succeed(Option.none()),
+      saveIncident: () => Effect.void,
+      applyCheck: () => Effect.succeed("Unchanged" as const),
+    } as never);
+    const res = await fetch(`${baseUrl}/targets`);
+    expect(res.status).toBe(200);
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+});

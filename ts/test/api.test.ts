@@ -144,3 +144,15 @@ describe("api error mapping (BUGS 10.1, 10.2, 19.1)", () => {
 // with other suites.
 type ServerHandle = { server: Server };
 void (0 as unknown as ServerHandle | null);
+
+describe("generated API contract artifacts (module 16.1)", () => {
+  it("publishes the OpenAPI artifact including every declared route", async () => {
+    const { openApiDocument } = await import("../src/http/api.js");
+    const paths = (openApiDocument as unknown as {
+      paths: Record<string, unknown>;
+    }).paths;
+    expect(Object.keys(paths).sort()).toEqual(
+      ["/checks", "/incidents/{id}", "/status", "/targets"].sort(),
+    );
+  });
+});

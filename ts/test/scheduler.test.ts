@@ -158,3 +158,47 @@ describe("log level reference (module 13)", () => {
       expect(demo.after).toBe(demo.before);
     }));
 });
+
+describe("scheduler edge cases (contract 5)", () => {
+  it.effect("rejects a zero worker count before allocating resources", () =>
+    Effect.gen(function*() {
+      const outcome = yield* Effect.result(
+        runOnceEffect([], { queueCapacity: 10, workerCount: 0 }).pipe(
+          Effect.provide(wired({})),
+        ),
+      );
+      expect(Result.isFailure(outcome)).toBe(true);
+      if (Result.isFailure(outcome)) expect(String((outcome.failure as { reason?: string }).reason)).toContain("workerCount");
+    }));
+
+  it.effect("completes without probing when every target is disabled", () =>
+    Effect.gen(function*() {
+      const checks = yield* Effect.gen(function*() {
+        const repo = yield* CheckRepository;
+        yield* runOnceEffect(
+          [target({ enabled: false, id: "target_off" as TargetId })],
+          { queueCapacity: 8, workerCount: 1 },
+        );
+        return repo.listChecks();
+      }).pipe(Effect.provide(wired({})));
+      expect((yield* checks)).toHaveLength(0);
+    }));
+
+  it.effect("skips a disabled target without abandoning later enabled ones", () =>
+    Effect.gen(function*() {
+      const checks = yield* Effect.gen(function*() {
+        const repo = yield* CheckRepository;
+        yield* runOnceEffect(
+          [
+            target({ enabled: false, id: "target_off" as TargetId }),
+            target({ id: "target_on" as TargetId }),
+          ],
+          { queueCapacity: 8, workerCount: 2 },
+        );
+        return repo.listChecks();
+      }).pipe(Effect.provide(wired({ target_on: valid() })));
+      const rows = yield* checks;
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.targetId).toBe("target_on");
+    }));
+});

@@ -108,3 +108,68 @@ describe("history import and digest", () => {
 });
 
 expect(typeof HistoryReadError).toBe("function");
+
+describe("digest aggregation details (contract 7.2)", () => {
+  it.effect("unknown row fields are ignored", () =>
+    Effect.gen(function*() {
+      const dir = yield* Effect.promise(() => mkdtemp(join(tmpdir(), "bw-digest-")));
+      const path = join(dir, "extra.ndjson");
+      const extra = JSON.stringify({
+        ...JSON.parse(row("a", "Up", 10)),
+        unknownField: "ignored",
+        nested: { deep: true },
+      });
+      yield* Effect.promise(() => writeFile(path, extra + "\n"));
+      const digest = yield* importHistoryEffect(path).pipe(Effect.provide(NodeFileSystemLayer));
+      expect(digest.processedRows).toBe(1);
+      expect(digest.malformedRows).toBe(0);
+      expect(digest.targets[0]!.checks).toBe(1);
+    }));
+
+  it.effect("equal-timestamp current-status ties break by check id", () =>
+    Effect.gen(function*() {
+      const dir = yield* Effect.promise(() => mkdtemp(join(tmpdir(), "bw-digest-")));
+      const path = join(dir, "tie.ndjson");
+      yield* Effect.promise(() =>
+        writeFile(path, [row("check_b", "Down", 10), row("check_a", "Up", 10)].join("\n") + "\n"),
+      );
+      const digest = yield* importHistoryEffect(path).pipe(Effect.provide(NodeFileSystemLayer));
+      // Same timestamp: the greater bytewise id wins for current status.
+      expect(digest.targets[0]!.currentStatus).toBe("Down");
+      expect(digest.targets[0]!.checks).toBe(2);
+    }));
+
+  it.effect("non-positive and non-finite durations are malformed rows", () =>
+    Effect.gen(function*() {
+      const dir = yield* Effect.promise(() => mkdtemp(join(tmpdir(), "bw-digest-")));
+      const path = join(dir, "bad-durations.ndjson");
+      yield* Effect.promise(() =>
+        writeFile(
+          path,
+          [row("a", "Up", 0), row("b", "Up", -5), row("c", "Up", 7)].join("\n") + "\n",
+        ),
+      );
+      const digest = yield* importHistoryEffect(path).pipe(Effect.provide(NodeFileSystemLayer));
+      expect(digest.processedRows).toBe(1);
+      expect(digest.malformedRows).toBe(2);
+    }));
+
+  it.effect("rows with lone-surrogate ids fail independently and later rows still import", () =>
+    Effect.gen(function*() {
+      const dir = yield* Effect.promise(() => mkdtemp(join(tmpdir(), "bw-digest-")));
+      const path = join(dir, "surrogate.ndjson");
+      yield* Effect.promise(() =>
+        writeFile(
+          path,
+          [
+            row("check_\uD800", "Up", 10),
+            row("check_ok", "Up", 10),
+          ].join("\n") + "\n",
+        ),
+      );
+      const digest = yield* importHistoryEffect(path).pipe(Effect.provide(NodeFileSystemLayer));
+      expect(digest.processedRows).toBe(1);
+      expect(digest.malformedRows).toBe(1);
+      expect(digest.targets[0]!.targetId).toBe("target_cli");
+    }));
+});

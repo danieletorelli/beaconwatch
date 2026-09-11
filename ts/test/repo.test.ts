@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Effect, Layer, Option, Result } from "effect";
+import { Duration, Effect, Layer, Option, Result } from "effect";
 import { TestClock } from "effect/testing";
 import { SqlClient } from "effect/unstable/sql";
 import {
@@ -248,4 +248,45 @@ describe("incident validation", () => {
       }),
     ).toThrow();
   });
+});
+
+describe("sqlite transactions and rollback", () => {
+  it.effect("a mid-write failure rolls back the transaction", () =>
+    Effect.gen(function*() {
+      const repo = yield* CheckRepository;
+      const sql = yield* SqlClient.SqlClient;
+      // A duration that cannot be encoded fails during the write, after the
+      // check insert began: the transaction must leave nothing durable.
+      const unrepresentable = new CheckResult({
+        id: "check_big" as CheckId,
+        targetId: targetId("target_api"),
+        checkedAt: new Date(100),
+        // A nanosecond count too large to represent as milliseconds in a
+        // double makes the codec fail during the write.
+        duration: Duration.nanos(BigInt("1" + "0".repeat(400))),
+        classification: new Up(),
+        failure: Option.none(),
+        response: new ResponseMetadata({ status: Option.some(200), bytes: Option.none() }),
+      });
+      const outcome = yield* Effect.result(repo.applyCheck(unrepresentable));
+      expect(Result.isFailure(outcome)).toBe(true);
+      const rows = yield* sql<{ n: number }>`select count(*) as n from checks`;
+      expect(Number(rows[0]!.n)).toBe(0);
+      const incidents = yield* sql<{ n: number }>`select count(*) as n from incidents`;
+      expect(Number(incidents[0]!.n)).toBe(0);
+      const events = yield* sql<{ n: number }>`select count(*) as n from incident_events`;
+      expect(Number(events[0]!.n)).toBe(0);
+    }).pipe(Effect.provide(layerForFile(makeTempFilename()))));
+
+  it.effect("preserves conflict error details across repositories", () =>
+    Effect.gen(function*() {
+      const repo = yield* CheckRepository;
+      yield* repo.saveCheck(check("check_c", "Up", 100));
+      const outcome = yield* Effect.result(
+        repo.saveCheck(check("check_c", "Up", 100, "2 ms")),
+      );
+      expect(Result.isFailure(outcome)).toBe(true);
+      if (Result.isFailure(outcome))
+        expect(String((outcome.failure as { cause: unknown }).cause)).toContain("check_c");
+    }).pipe(Effect.provide(layerForFile(makeTempFilename()))));
 });

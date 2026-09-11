@@ -78,3 +78,27 @@ describe("readiness (BUGS 2.8)", () => {
       if (Result.isFailure(outcome)) expect(outcome.failure).toBe("boom");
     }));
 });
+
+describe("status state edge cases", () => {
+  it.effect("equal-timestamp Unicode ids order by code point", () =>
+    Effect.gen(function*() {
+      const status = yield* program;
+      // "é" (U+00E9) is greater than "z" (U+007A) by code point.
+      yield* status.update(check("check_z", 100));
+      yield* status.update(check("check_é", 100));
+      const entry = yield* status.get(targetId("target_api"));
+      expect(Option.getOrThrow(entry).latest.id).toBe("check_é");
+    }));
+
+  it.effect("stored timestamps cannot be mutated through entries", () =>
+    Effect.gen(function*() {
+      const status = yield* program;
+      yield* status.update(check("check_a", 100));
+      const entry = yield* status.get(targetId("target_api"));
+      const stored = Option.getOrThrow(entry).latest;
+      const before = stored.checkedAt.getTime();
+      (stored.checkedAt as Date).setTime(999);
+      const again = Option.getOrThrow(yield* status.get(targetId("target_api")));
+      expect(again.latest.checkedAt.getTime()).toBe(before);
+    }));
+});
