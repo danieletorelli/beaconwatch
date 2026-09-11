@@ -162,3 +162,27 @@ describe("probe repository integration", () => {
       expect(Option.isSome(open)).toBe(true);
     }));
 });
+
+describe("probe client validation (BUGS 13.7)", () => {
+  it("rejects empty script sequences at construction", () => {
+    expect(() => new FakeProbeClient({ target_api: [] })).toThrow();
+  });
+  it("rejects negative and fractional recover-after counts", () => {
+    expect(() => new FakeProbeClient({ target_api: recoverAfter(-1) })).toThrow();
+    expect(() => new FakeProbeClient({ target_api: recoverAfter(1.5) })).toThrow();
+    expect(() => new FakeProbeClient({ target_api: recoverAfter(Number.MAX_SAFE_INTEGER + 1) })).toThrow();
+  });
+});
+
+describe("probe classification precedence (BUGS 2.7)", () => {
+  it.effect("an unexpected status overrides a body failure", () =>
+    Effect.gen(function*() {
+      const client = new FakeProbeClient({ target_api: valid(500) });
+      const withSchema = target({
+        healthBodySchema: JSON.stringify({ type: "object", required: ["missing"] }),
+      });
+      const check = yield* probeOnce(withSchema, client);
+      expect(check.classification._tag).toBe("Down");
+      expect(Option.getOrThrow(check.failure).reason).toBe("UnexpectedStatus");
+    }));
+});

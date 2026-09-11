@@ -75,4 +75,21 @@ describe("live HTTP probe client", () => {
       expect(reset.classification._tag).toBe("Down");
       expect(Option.getOrThrow(reset.failure).reason).toBe("DnsError");
     }));
+
+  it.live("probes ask for JSON (BUGS 13.8)", () =>
+    Effect.gen(function*() {
+      const { url, lastAccept } = yield* mockTargetServer;
+      const client = new HttpProbeClient();
+      yield* probeOnce(target(`${url}/ok`, { slowThreshold: "10 seconds" }), client);
+      expect(lastAccept.value).toBe("application/json");
+    }));
+
+  it.live("a hanging transport exchange times out and records the failure", () =>
+    Effect.gen(function*() {
+      const { url } = yield* mockTargetServer;
+      const client = new HttpProbeClient();
+      const check = yield* probeOnce(target(`${url}/slow`, { timeout: "30 ms" }), client);
+      expect(check.classification._tag).toBe("Down");
+      expect(Option.getOrThrow(check.failure).reason).toBe("TimeoutError");
+    }));
 });
