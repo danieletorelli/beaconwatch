@@ -179,7 +179,7 @@ with `Effect.tryPromise` for error capture and `Effect.sleep` for delays.
 **Files affected:**
 - `services/HttpProbeClient.ts` — `probe` method
 - `services/ProbeClient.ts` — `FakeProbeClient.probe`
-- `probe/ProbeProgram.ts` — `probeOnce`, `probeOnceWithRetry`
+- `probe/ProbeProgram.ts` — `probeOnce`
 - `services/DigestService.ts` — `importHistoryEffect`, `digestFromStreamEffect`
 - `obs/Telemetry.ts` — `recordCheckMetricsEffect`
 
@@ -238,9 +238,11 @@ const probeOnceImpl = (...) => Effect.gen(function*() {
 ## Pattern 5: Imperative Loop with AbortController → `Effect.gen` + `Effect.sleep`
 
 **What changed:** The hand-rolled retry loop in `probeOnce` that used
-`AbortController`, `setTimeout`, and manual retry counting was replaced with
-`Effect.gen` using `Effect.match` for error capture and `Effect.sleep` for
-backoff delays.
+`AbortController`, `setTimeout`, and manual retry counting was replaced first
+with an `Effect.gen` loop, and finally with `Effect.retry` driven by a named
+Schedule policy: per-attempt `Effect.timeoutOption`, an exponentially increasing
+delay starting at 10 ms with jitter, and a `while` predicate that retries only
+transient transport failures.
 
 **Files affected:**
 - `probe/ProbeProgram.ts` — `probeOnce`
@@ -269,29 +271,32 @@ for (let attempt = 0; attempt < 4; attempt++) {
 
 **After:**
 ```ts
-for (let attempt = 0; attempt < 4; attempt++) {
-  const result = yield* client.probe(target).pipe(
-    Effect.match({
-      onFailure: (e) => ({ tag: "failure" as const, error: e as DomainError }),
-      onSuccess: (v) => ({ tag: "success" as const, value: v }),
-    }),
-  );
-  if (result.tag === "success") {
-    raw = result.value;
-    failure = undefined;
-    break;
-  }
-  failure = result.error;
-  if (attempt === 3) break;
-  yield* Effect.sleep(10 * 2 ** attempt);
-}
+const retryPolicy = Schedule.jittered(
+  Schedule.exponential(10).pipe(Schedule.upTo({ times: 3 })),
+);
+
+const outcome = yield* client.probe(target).pipe(
+  Effect.timeoutOption(target.timeout),
+  Effect.flatMap((o) =>
+    Option.isNone(o)
+      ? Effect.fail(new TimeoutError({ timeout: String(target.timeout) }))
+      : Effect.succeed(o.value)
+  ),
+  Effect.retry({ schedule: retryPolicy, while: isTransient }),
+  Effect.match({
+    onFailure: (e) => ({ tag: "failure" as const, error: e }),
+    onSuccess: (v) => ({ tag: "success" as const, value: v }),
+  }),
+);
 ```
 
 **Why:**
-- `Effect.match` captures both success and failure without try/catch
-- `Effect.sleep` handles backoff without manual `setTimeout`
-- No manual `AbortController` management (the probe client handles timeout)
-- Typed error channel propagates `ProbeFailure` automatically
+- The policy is a named value: attempt count, backoff shape, jitter, and the
+  transient predicate are stated once instead of spread through control flow
+- `Effect.timeoutOption` applies the configured timeout to each attempt
+- Only DNS and timeout failures consume retry budget; permanent failures
+  propagate immediately
+- `TestClock` can prove the timing shape without real wall-clock waits
 
 ---
 
@@ -373,8 +378,7 @@ to `Effect.forEach(array, ..., { concurrency: N })` where `N` comes from the
 configured worker count.
 
 **Files affected:**
-- `watch/Scheduler.ts` — `runOnceEffect`
-- `probe/ProbeProgram.ts` — `repeatSuccessfulProbe`
+- `watch/Scheduler.ts` — `runOnceEffect`, `watchLoopEffect`
 
 **Before:**
 ```ts
@@ -494,21 +498,23 @@ wrapping convention.
 
 ---
 
-## Pattern 13: `Effect.retry(Schedule)` → Selective Retry with `while`
+## Pattern 13: Unconditional Retry → Selective Retry with `while`
 
 **What changed:** `Effect.retry(Schedule.exponential(...).pipe(Schedule.upTo(...)))`
-was changed to `Effect.retry({ schedule: ..., while: predicate })` so only
-transient transport errors trigger retries. Permanent errors (`TargetDisabled`,
-`UnexpectedStatus`, `InvalidBody`) fail immediately.
+retries every error; the live probe path now uses
+`Effect.retry({ schedule: ..., while: predicate })` so only transient transport
+errors trigger retries. Permanent errors (`TargetDisabled`, `UnexpectedStatus`,
+`InvalidBody`) fail immediately. The selective policy lives inside `probeOnce`
+(see Pattern 5); a separate `probeOnceWithRetry` wrapper would have multiplied
+the attempt budget, so it was removed.
 
 **Files affected:**
-- `probe/ProbeProgram.ts` — `probeOnceWithRetry`
+- `probe/ProbeProgram.ts` — `probeOnce` (retry policy + `while` predicate)
 
 **Before:**
 ```ts
-probeOnce(target, client).pipe(
-  Effect.retry(Schedule.exponential(10).pipe(Schedule.upTo({ times: 3 })))
-);
+// retries every failure, including permanent ones
+Effect.retry(Schedule.exponential(10).pipe(Schedule.upTo({ times: 3 })))
 ```
 
 **After:**
@@ -516,12 +522,10 @@ probeOnce(target, client).pipe(
 const isTransient = (error: DomainError) =>
   error._tag === "DnsError" || error._tag === "TimeoutError";
 
-probeOnce(target, client).pipe(
-  Effect.retry({
-    schedule: Schedule.jittered(Schedule.exponential(10).pipe(Schedule.upTo({ times: 3 }))),
-    while: isTransient,
-  })
-);
+Effect.retry({
+  schedule: Schedule.jittered(Schedule.exponential(10).pipe(Schedule.upTo({ times: 3 }))),
+  while: isTransient,
+})
 ```
 
 **Why:**

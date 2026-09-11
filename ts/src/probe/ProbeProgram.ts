@@ -1,5 +1,5 @@
 import AjvModule from "ajv";
-import { Clock, Effect, Result, Schedule } from "effect";
+import { Clock, Effect, Option, Result, Schedule } from "effect";
 import { randomUUID } from "node:crypto";
 import {
   CheckFailure,
@@ -15,6 +15,7 @@ import {
   TargetDisabled,
   UnexpectedStatus,
   InvalidBody,
+  TimeoutError,
   HealthSchemaParseError,
   HealthBodyMismatch,
   type DomainError,
@@ -42,8 +43,15 @@ const validateBody = (schema: object, body: unknown): Effect.Effect<boolean, Hea
     try: () => ajv.compile(schema)(body),
     catch: (e) => new HealthSchemaParseError({ reason: `invalid health schema: ${String(e)}` }),
   });
-export const repeatSuccessfulProbe = <A>(run: Effect.Effect<A>, repeats: number): Effect.Effect<A[]> =>
-  Effect.forEach(Array.from({ length: repeats }), () => run);
+const isTransient = (error: DomainError) =>
+  error._tag === "DnsError" || error._tag === "TimeoutError";
+
+// At most four attempts total, exponentially increasing delays starting at
+// 10 ms with jitter, retried only for transient transport failures (SPEC 3.2).
+const retryPolicy = Schedule.jittered(
+  Schedule.exponential(10).pipe(Schedule.upTo({ times: 3 })),
+);
+
 export const probeOnce = (
   target: Target | TargetConfig,
   client: ProbeClientShape,
@@ -52,24 +60,27 @@ export const probeOnce = (
     if ("enabled" in target && !target.enabled)
       return yield* Effect.fail(new TargetDisabled({ targetId: target.id }));
     const start = yield* Clock.currentTimeMillis;
+    // Each attempt is cut by the configured timeout; a hanging exchange
+    // becomes a transient timeout failure the retry policy may recover.
+    const attempt = client.probe(target).pipe(
+      Effect.timeoutOption(target.timeout),
+      Effect.flatMap((o) =>
+        Option.isNone(o)
+          ? Effect.fail(new TimeoutError({ timeout: String(target.timeout) }))
+          : Effect.succeed(o.value)
+      ),
+    );
+    const outcome = yield* attempt.pipe(
+      Effect.retry({ schedule: retryPolicy, while: isTransient }),
+      Effect.match({
+        onFailure: (e) => ({ tag: "failure" as const, error: e }),
+        onSuccess: (v) => ({ tag: "success" as const, value: v }),
+      }),
+    );
     let raw: RawProbeResponse | undefined;
     let failure: DomainError | undefined;
-    for (let attempt = 0; attempt < 4; attempt++) {
-      const result = yield* client.probe(target).pipe(
-        Effect.match({
-          onFailure: (e) => ({ tag: "failure" as const, error: e as DomainError }),
-          onSuccess: (v) => ({ tag: "success" as const, value: v }),
-        }),
-      );
-      if (result.tag === "success") {
-        raw = result.value;
-        failure = undefined;
-        break;
-      }
-      failure = result.error;
-      if (attempt === 3) break;
-      yield* Effect.sleep(10 * 2 ** attempt);
-    }
+    if (outcome.tag === "success") raw = outcome.value;
+    else failure = outcome.error;
     const end = yield* Clock.currentTimeMillis,
       duration = Math.max(1, end - start);
     if (raw && target.healthBodySchema !== undefined) {
@@ -121,14 +132,3 @@ export const probeOnce = (
       }),
     });
   });
-
-const isTransient = (error: DomainError) =>
-  error._tag === "DnsError" || error._tag === "TimeoutError";
-
-export const probeOnceWithRetry = (
-  target: Target | TargetConfig,
-  client: ProbeClientShape,
-): Effect.Effect<CheckResult, DomainError> =>
-  probeOnce(target, client).pipe(
-    Effect.retry({ schedule: Schedule.jittered(Schedule.exponential(10).pipe(Schedule.upTo({ times: 3 }))), while: isTransient }),
-  );
