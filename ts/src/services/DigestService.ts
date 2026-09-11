@@ -1,6 +1,5 @@
-import { Data, Duration, Effect, Option, Schema, Stream } from "effect";
-import { createReadStream } from "node:fs";
-import { Readable } from "node:stream";
+import { Data, Duration, Effect, Option, Schema, Sink, Stream } from "effect";
+import * as FileSystem from "effect/FileSystem";
 import { HistoryReadError } from "../domain/errors.js";
 import {
   CheckFailure,
@@ -83,57 +82,104 @@ const toCheck = (x: HistoryRow) =>
     }),
   });
 
-export const digestFromStreamEffect = (
-  rows: Iterable<CheckResult | MalformedHistoryRow>,
-): Effect.Effect<Digest> =>
-  Effect.sync(() => {
-    const byId = new Map<string, CheckResult>();
-    const conflicts = new Set<string>();
-    let malformedRows = 0,
-      processedRows = 0;
-    for (const row of rows) {
-      if (row instanceof MalformedHistoryRow) {
-        malformedRows++;
-        continue;
-      }
-      processedRows++;
-      if (conflicts.has(row.id)) continue;
-      const old = byId.get(row.id);
-      if (old && JSON.stringify(old) !== JSON.stringify(row)) {
-        byId.delete(row.id);
-        conflicts.add(row.id);
-        malformedRows++;
-      } else if (!old) byId.set(row.id, row);
-    }
-    const grouped = new Map<TargetId, CheckResult[]>();
-    for (const c of byId.values())
-      grouped.set(c.targetId, [...(grouped.get(c.targetId) ?? []), c]);
-    const targets = [...grouped]
-      .map(([id, checks]) => {
-        checks.sort(
-          (a, b) =>
-            a.checkedAt.getTime() - b.checkedAt.getTime() ||
-            Buffer.compare(Buffer.from(a.id), Buffer.from(b.id)),
-        );
-        const lat = checks
-          .map((x) => Duration.toMillis(x.duration))
-          .sort((a, b) => a - b);
-        return {
-          targetId: id,
-          currentStatus: checks.at(-1)!.classification._tag,
-          p95LatencyMillis: lat[Math.ceil(lat.length * 0.95) - 1] ?? 0,
-          uptimePercent:
-            (checks.filter((x) => x.classification._tag === "Up").length /
-              checks.length) *
-            100,
-          checks: checks.length,
-        };
-      })
-      .sort((a, b) =>
-        Buffer.compare(Buffer.from(a.targetId), Buffer.from(b.targetId)),
+type State = {
+  readonly byTarget: Map<TargetId, CheckResult[]>;
+  readonly checksById: Map<string, CheckResult>;
+  readonly conflictingIds: Set<string>;
+  readonly malformedRows: number;
+  readonly processedRows: number;
+};
+const initial = (): State => ({
+  byTarget: new Map(),
+  checksById: new Map(),
+  conflictingIds: new Set(),
+  malformedRows: 0,
+  processedRows: 0,
+});
+
+const addCheck = (state: State, check: CheckResult): State => {
+  const processedRows = state.processedRows + 1;
+  if (state.conflictingIds.has(check.id)) return { ...state, processedRows };
+  const existing = state.checksById.get(check.id);
+  if (existing && JSON.stringify(existing) === JSON.stringify(check))
+    return { ...state, processedRows };
+  if (existing) {
+    // Conflicting duplicate: the id is excluded entirely and one malformed
+    // row is counted (SPEC 7.2).
+    const byTarget = new Map(state.byTarget);
+    const retained = (byTarget.get(existing.targetId) ?? []).filter(
+      (candidate) => candidate.id !== check.id,
+    );
+    if (retained.length === 0) byTarget.delete(existing.targetId);
+    else byTarget.set(existing.targetId, retained);
+    const conflictingIds = new Set(state.conflictingIds);
+    conflictingIds.add(check.id);
+    return {
+      ...state,
+      byTarget,
+      conflictingIds,
+      malformedRows: state.malformedRows + 1,
+      processedRows,
+    };
+  }
+  const byTarget = new Map(state.byTarget);
+  byTarget.set(check.targetId, [...(byTarget.get(check.targetId) ?? []), check]);
+  const checksById = new Map(state.checksById);
+  checksById.set(check.id, check);
+  return { ...state, byTarget, checksById, processedRows };
+};
+
+export const digestSink = Sink.fold<State, CheckResult | MalformedHistoryRow>(
+  initial,
+  () => true,
+  (state, row) =>
+    Effect.succeed(
+      row instanceof MalformedHistoryRow
+        ? { ...state, malformedRows: state.malformedRows + 1 }
+        : addCheck(state, row),
+    ),
+);
+
+const percentile95 = (xs: ReadonlyArray<number>) => {
+  if (xs.length === 0) return 0;
+  const sorted = [...xs].sort((a, b) => a - b);
+  return sorted[Math.ceil(sorted.length * 0.95) - 1] ?? 0;
+};
+const orderText = (a: string, b: string) =>
+  Buffer.compare(Buffer.from(a), Buffer.from(b));
+
+const finalize = (state: State): Digest => ({
+  malformedRows: state.malformedRows,
+  processedRows: state.processedRows,
+  incidents: [],
+  targets: [...state.byTarget.entries()]
+    .map(([targetId, checks]) => {
+      const ordered = [...checks].sort(
+        (a, b) =>
+          a.checkedAt.getTime() - b.checkedAt.getTime() ||
+          orderText(a.id, b.id),
       );
-    return { targets, incidents: [], malformedRows, processedRows };
-  });
+      const latest = ordered[ordered.length - 1]!;
+      const up = ordered.filter((c) => c.classification._tag === "Up").length;
+      return {
+        targetId,
+        currentStatus: latest.classification._tag,
+        p95LatencyMillis: percentile95(
+          ordered.map((c) => Duration.toMillis(c.duration)),
+        ),
+        uptimePercent: (up / ordered.length) * 100,
+        checks: ordered.length,
+      };
+    })
+    .sort((a, b) => orderText(a.targetId, b.targetId)),
+});
+
+export const digestFromStreamEffect = <E, R = never>(
+  stream: Stream.Stream<CheckResult | MalformedHistoryRow, E, R>,
+): Effect.Effect<Digest, E, R> =>
+  Stream.run(stream, digestSink).pipe(Effect.map(finalize));
+export const digestFromRows = (rows: Array<CheckResult | MalformedHistoryRow>) =>
+  digestFromStreamEffect(Stream.fromIterable(rows));
 
 export const decodeHistoryLineEffect = (
   line: string,
@@ -158,42 +204,53 @@ export const decodeHistoryLineEffect = (
     ),
   );
 
-// Incremental UTF-8 line source with fatal decoding: malformed byte sequences
-// fail as HistoryReadError instead of being replacement-decoded (17.6), and
-// consumers taking a finite prefix never read the remainder (17.5).
-const historyLines = (path: string): Stream.Stream<string, HistoryReadError> =>
-  Stream.fromAsyncIterable(
-    (async function* () {
-      const decoded = Readable.toWeb(createReadStream(path)).pipeThrough(
-        new TextDecoderStream("utf-8", { fatal: true }),
-      );
-      for await (const chunk of decoded as AsyncIterable<string>) yield chunk;
-      yield "\n"; // flush a final line without trailing newline
-    })(),
-    (e) => new HistoryReadError({ path, cause: e }),
-  ).pipe(
-    // mapAccum spreads the returned line array as individual elements
-    Stream.mapAccum(() => "", (pending: string, chunk: string) => {
-      const parts = (pending + chunk).split(/\r?\n/);
-      return [parts.pop() ?? "", parts] as const;
-    }),
-  );
+// Incremental UTF-8 line source through the replaceable FileSystem
+// capability, with fatal decoding: malformed byte sequences fail as
+// HistoryReadError instead of being replacement-decoded (17.6), and consumers
+// taking a finite prefix never read the remainder (17.5).
+export const historyLines = (
+  path: string,
+): Stream.Stream<{ line: string; lineNo: number }, HistoryReadError, FileSystem.FileSystem> =>
+  Stream.unwrap(Effect.gen(function*() {
+    const fs = yield* FileSystem.FileSystem;
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    return fs.stream(path).pipe(
+      Stream.map((chunk) => ({ chunk, final: false })),
+      Stream.concat(Stream.succeed({ chunk: new Uint8Array(), final: true })),
+      Stream.mapEffect(
+        ({ chunk, final }) =>
+          Effect.try({
+            try: () => decoder.decode(chunk, { stream: !final }),
+            catch: (cause) => new HistoryReadError({ path, cause }),
+          }),
+      ),
+      Stream.splitLines,
+      Stream.filter((line) => line.trim().length > 0),
+      Stream.zipWithIndex,
+      Stream.map(([line, index]) => ({ line, lineNo: index + 1 })),
+      Stream.mapError((cause) =>
+        cause instanceof HistoryReadError ? cause : new HistoryReadError({ path, cause }),
+      ),
+    );
+  }));
 
-export const importHistoryEffect = (path: string): Effect.Effect<Digest, HistoryReadError> =>
-  historyLines(path).pipe(
-    Stream.mapAccumEffect<number, string, CheckResult | MalformedHistoryRow, never, never>(
-      () => 0,
-      (i, line) =>
-        line.trim() === ""
-          ? Effect.succeed([i, []] as const) // blank lines are ignored and unnumbered
-          : decodeHistoryLineEffect(line, i + 1).pipe(
-              Effect.match({
-                onSuccess: (row) => [i + 1, [row]] as const,
-                onFailure: (e) => [i + 1, [e] as ReadonlyArray<MalformedHistoryRow>] as const,
-              })
-            ),
-    ),
-    Stream.runCollect,
-    Effect.flatMap((chunk) => digestFromStreamEffect(Array.from(chunk))),
-    Effect.withSpan("digest"),
-  );
+export const importHistoryEffect = (
+  path: string,
+): Effect.Effect<Digest, HistoryReadError, FileSystem.FileSystem> =>
+  Effect.gen(function*() {
+    const rows = yield* historyLines(path).pipe(
+      // Decoding may happen concurrently, bounded (SPEC 7.1).
+      Stream.mapEffect(
+        ({ line, lineNo }: { line: string; lineNo: number }) =>
+          decodeHistoryLineEffect(line, lineNo).pipe(
+            Effect.match({
+              onFailure: (e) => e as CheckResult | MalformedHistoryRow,
+              onSuccess: (check) => check as CheckResult | MalformedHistoryRow,
+            }),
+          ),
+        { concurrency: 8 },
+      ),
+      Stream.runCollect,
+    );
+    return yield* digestFromStreamEffect(Stream.fromIterable(Array.from(rows)));
+  }).pipe(Effect.withSpan("digest"));

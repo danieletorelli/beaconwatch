@@ -3,6 +3,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Effect, Result } from "effect";
+import { layer as NodeFileSystemLayer } from "@effect/platform-node/NodeFileSystem";
 import { decodeHistoryLineEffect, importHistoryEffect } from "../src/services/DigestService.js";
 import { HistoryReadError } from "../src/domain/errors.js";
 
@@ -24,7 +25,7 @@ describe("history import and digest", () => {
       yield* Effect.promise(() =>
         writeFile(path, [row("a", "Up", 10), "", "   ", row("b", "Down", 20), '{"broken"', row("c", "Slow", 5)].join("\n") + "\n"),
       );
-      const digest = yield* importHistoryEffect(path);
+      const digest = yield* importHistoryEffect(path).pipe(Effect.provide(NodeFileSystemLayer));
       // a=Up, b=Down, c=Slow processed; one malformed line; blanks unnumbered.
       expect(digest.processedRows).toBe(3);
       expect(digest.malformedRows).toBe(1);
@@ -43,7 +44,7 @@ describe("history import and digest", () => {
       yield* Effect.promise(() =>
         writeFile(path, [row("a", "Up", 10), row("a", "Down", 99), row("b", "Up", 5)].join("\n") + "\n"),
       );
-      const digest = yield* importHistoryEffect(path);
+      const digest = yield* importHistoryEffect(path).pipe(Effect.provide(NodeFileSystemLayer));
       expect(digest.processedRows).toBe(3);
       expect(digest.malformedRows).toBe(1); // conflicting id penalty
       const t = digest.targets[0]!;
@@ -54,7 +55,7 @@ describe("history import and digest", () => {
   it.effect("missing files fail as HistoryReadError with the path", () =>
     Effect.gen(function*() {
       const outcome = yield* Effect.result(
-        importHistoryEffect(join(tmpdir(), "bw-digest-missing.ndjson")),
+        importHistoryEffect(join(tmpdir(), "bw-digest-missing.ndjson")).pipe(Effect.provide(NodeFileSystemLayer)),
       );
       expect(outcome._tag).toBe("Failure");
       if (outcome._tag === "Failure") {
@@ -68,7 +69,7 @@ describe("history import and digest", () => {
       const dir = yield* Effect.promise(() => mkdtemp(join(tmpdir(), "bw-digest-")));
       const path = join(dir, "bad.ndjson");
       yield* Effect.promise(() => writeFile(path, new Uint8Array([0xff, 0xfe])));
-      const outcome = yield* Effect.result(importHistoryEffect(path));
+      const outcome = yield* Effect.result(importHistoryEffect(path).pipe(Effect.provide(NodeFileSystemLayer)));
       expect(outcome._tag === "Failure" && outcome.failure._tag === "HistoryReadError").toBe(true);
     }));
 
@@ -79,7 +80,7 @@ describe("history import and digest", () => {
       yield* Effect.promise(() =>
         writeFile(path, [row("a", "Up", 10), row("b", "Up", 1e308)].join("\n") + "\n"),
       );
-      const digest = yield* importHistoryEffect(path);
+      const digest = yield* importHistoryEffect(path).pipe(Effect.provide(NodeFileSystemLayer));
       expect(digest.processedRows).toBe(1);
       expect(digest.malformedRows).toBe(1);
     }));
