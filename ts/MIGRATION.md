@@ -713,6 +713,103 @@ export const renameCheck = (check: { id: string }, id: string) => ({
 
 ---
 
+## Pattern 19: Whole-File Read → Incremental Line Stream with Fatal Decoding
+
+**What changed:** History import loaded the entire file with `readFile(path, "utf8")`
+and split it eagerly. It now consumes a line `Stream` sourced from a decoded
+read stream, so a consumer taking a finite prefix (`Stream.take`) never reads
+the remainder, and malformed UTF-8 fails as `HistoryReadError` instead of being
+silently replacement-decoded.
+
+**Files affected:**
+- `services/DigestService.ts` — `historyLines`, `importHistoryEffect`
+
+**Before:**
+```ts
+const text = yield* Effect.tryPromise({ try: () => readFile(path, "utf8"), ... });
+const lines = text.split(/\r?\n/).filter((x) => x.trim());
+yield* Stream.fromIterable(lines).pipe(/* decode pipeline */);
+```
+
+**After:**
+```ts
+const historyLines = (path: string): Stream.Stream<string, HistoryReadError> =>
+  Stream.fromAsyncIterable(
+    (async function* () {
+      const decoded = Readable.toWeb(createReadStream(path)).pipeThrough(
+        new TextDecoderStream("utf-8", { fatal: true }),
+      );
+      for await (const chunk of decoded as AsyncIterable<string>) yield chunk;
+      yield "\n"; // flush a final line without trailing newline
+    })(),
+    (e) => new HistoryReadError({ path, cause: e }),
+  ).pipe(
+    Stream.mapAccum(() => "", (pending, chunk) => {
+      const parts = (pending + chunk).split(/\r?\n/);
+      return [parts.pop() ?? "", parts] as const;
+    }),
+  );
+```
+
+**Why:**
+- `readFile(path, "utf8")` replacement-decodes invalid byte sequences, hiding corruption
+- `{ fatal: true }` turns malformed UTF-8 into a typed failure at the boundary
+- `Stream.mapAccum` splits chunk boundaries safely and emits lines lazily
+- Line numbering follows the SPEC: blanks are skipped without consuming a number
+
+---
+
+## Pattern 20: Plain Duration Storage → Versioned Duration Codec
+
+**What changed:** The SQLite paths stored `duration` as a plain JSON number and
+re-decoded it through the duration boundary, re-scaling persisted milliseconds
+by 1000 on every read. A shared codec now encodes integer milliseconds as plain
+numbers, sub-millisecond precision as tagged nanoseconds, and positive infinity
+as a tagged encoding; decode accepts legacy numbers, all tagged encodings, and
+fails unknown tags as `RepositoryError`.
+
+**Files affected:**
+- `repo/SqliteCheckRepository.ts` — `decodeDuration`, `encodeDuration`
+- `domain/schema.ts` — `positive` accepts positive infinity (it can only arrive through the tagged decode)
+
+**Before:**
+```ts
+// decode: persisted 42 (ms) re-scaled to 42000 by the duration boundary
+new CheckResult({ ...x, checkedAt: new Date(x.checkedAt), ... });
+// encode: JSON.stringify(c) — Infinity silently became null
+```
+
+**After:**
+```ts
+const decodeDuration = (x: unknown): number => {
+  if (typeof x === "number") return x; // legacy numeric milliseconds
+  if (x !== null && typeof x === "object" && "tag" in x) {
+    const t = x as { tag: unknown; millis?: unknown; nanos?: unknown; direction?: unknown };
+    if (t.tag === "millis" && typeof t.millis === "number") return t.millis;
+    if (t.tag === "nanos" && Number.isSafeInteger(t.nanos)) return (t.nanos as number) / 1_000_000;
+    if (t.tag === "infinity") {
+      if (t.direction === "positive") return Number.POSITIVE_INFINITY;
+      if (t.direction === "negative") return Number.NEGATIVE_INFINITY;
+    }
+  }
+  throw new RepositoryError({ operation: "decodeDuration", cause: `unknown duration encoding: ${JSON.stringify(x)}` });
+};
+const encodeDuration = (n: number): number | Record<string, unknown> => {
+  if (n === Number.POSITIVE_INFINITY) return { tag: "infinity", direction: "positive" };
+  if (Number.isInteger(n)) return n;
+  const nanos = n * 1_000_000;
+  if (Number.isSafeInteger(nanos)) return { tag: "nanos", nanos };
+  throw new RepositoryError({ operation: "saveCheck", cause: `duration ${String(n)} is not representable` });
+};
+```
+
+**Why:**
+- Round-trip stability: persisted values decode to the same duration they had when saved
+- Nanosecond values round-trip exactly; unknown tags fail loudly instead of guessing
+- Positive infinity satisfies the strictly-positive boundary; negative infinity does not
+
+---
+
 ## Migration Order
 
 The migration was performed in this order to minimize ripple effects:
@@ -735,3 +832,5 @@ The migration was performed in this order to minimize ripple effects:
 16. **Clock** (`probe/ProbeProgram.ts`) — Clock.currentTimeMillis for testability
 17. **Configuration** (`services/Config.ts`) — Effect Config layer with Config.all, Config.redacted
 18. **Immutability** (`domain/values.ts`) — Immutable replacement instead of mutation
+19. **History import** (`services/DigestService.ts`) — Incremental line stream with fatal UTF-8 decoding
+20. **Duration persistence** (`repo/SqliteCheckRepository.ts`) — Versioned duration codec at the persistence boundary
