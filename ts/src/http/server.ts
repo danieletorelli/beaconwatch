@@ -1,5 +1,5 @@
 import http from "node:http";
-import { Option } from "effect";
+import { Effect, Option } from "effect";
 import type { CheckRepositoryShape } from "../repo/CheckRepository.js";
 import { incidentIdPattern } from "./api.js";
 import { openApiDocument } from "./openapi.js";
@@ -22,9 +22,10 @@ export const createApiHandler =
     if (url.pathname === "/openapi.json") return send(200, openApiDocument);
     if (url.pathname === "/targets") {
       try {
+        const targets = await Effect.runPromise(repo.listTargets());
         return send(
           200,
-          (await repo.listTargets()).map(({ id, name, url, enabled }) => ({
+          targets.map(({ id, name, url, enabled }) => ({
             id,
             name,
             url,
@@ -37,19 +38,18 @@ export const createApiHandler =
     }
     if (url.pathname === "/status") {
       try {
-        return send(200, {
-          ok: true,
-          targets: (await repo.listTargets()).length,
-        });
+        const targets = await Effect.runPromise(repo.listTargets());
+        return send(200, { ok: true, targets: targets.length });
       } catch (e) {
         return repoFailure("failed to read status")(e);
       }
     }
     if (url.pathname === "/checks") {
       try {
+        const checks = await Effect.runPromise(repo.listChecks());
         return send(
           200,
-          (await repo.listChecks()).map((c) => ({
+          checks.map((c) => ({
             id: c.id,
             targetId: c.targetId,
             classification: c.classification._tag,
@@ -64,7 +64,7 @@ export const createApiHandler =
       if (!incidentIdPattern.test(id))
         return send(400, { message: "invalid incident id" });
       try {
-        const iResult = await repo.getIncident(id);
+        const iResult = await Effect.runPromise(repo.getIncident(id));
         return Option.isSome(iResult)
           ? send(200, {
               id: iResult.value.id,

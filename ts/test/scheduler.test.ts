@@ -10,7 +10,7 @@ import {
   targetUpDownMetric,
 } from "../src/obs/Telemetry.js";
 import { fiberLocalMinimumLogLevelDemo } from "../src/obs/references.js";
-import { CheckRepository, InMemoryCheckRepository } from "../src/repo/CheckRepository.js";
+import { CheckRepository, InMemoryLayer } from "../src/repo/CheckRepository.js";
 import { FakeProbeClient, ProbeClient, valid } from "../src/services/ProbeClient.js";
 import { StatusStateLayer } from "../src/watch/StatusState.js";
 import { runOnceEffect, watchLoopEffect } from "../src/watch/Scheduler.js";
@@ -40,13 +40,10 @@ const checkLike = (tag: "Up" | "Down") =>
     response: new ResponseMetadata({ status: Option.some(200), bytes: Option.none() }),
   });
 
-const wired = (
-  repo: InMemoryCheckRepository,
-  scripts: ConstructorParameters<typeof FakeProbeClient>[0],
-) =>
+const wired = (scripts: ConstructorParameters<typeof FakeProbeClient>[0]) =>
   Layer.mergeAll(
     StatusStateLayer,
-    Layer.succeed(CheckRepository)(repo),
+    InMemoryLayer,
     Layer.succeed(ProbeClient)(new FakeProbeClient(scripts)),
   );
 
@@ -55,14 +52,14 @@ describe("scheduler", () => {
     Effect.gen(function*() {
       const outcome = yield* Effect.result(
         runOnceEffect([], { queueCapacity: 0, workerCount: 2 }).pipe(
-          Effect.provide(wired(new InMemoryCheckRepository(), {})),
+          Effect.provide(wired({})),
         ),
       );
       expect(Result.isFailure(outcome)).toBe(true);
       if (Result.isFailure(outcome)) expect(String(outcome.failure)).toContain("ConfigError");
       const tooManyWorkers = yield* Effect.result(
         runOnceEffect([], { queueCapacity: 10, workerCount: 2000 }).pipe(
-          Effect.provide(wired(new InMemoryCheckRepository(), {})),
+          Effect.provide(wired({})),
         ),
       );
       expect(Result.isFailure(tooManyWorkers)).toBe(true);
@@ -70,26 +67,27 @@ describe("scheduler", () => {
 
   it.effect("runs each enabled target once and publishes status", () =>
     Effect.gen(function*() {
-      const repo = new InMemoryCheckRepository();
-      yield* runOnceEffect(
-        [target(), target({ enabled: false, id: "target_off" as TargetId })],
-        { queueCapacity: 8, workerCount: 2 },
-      ).pipe(Effect.provide(wired(repo, { target_api: valid() })));
-      const checks = yield* Effect.tryPromise(() => repo.listChecks());
-      expect(checks).toHaveLength(1);
-      const open = yield* Effect.tryPromise(() => repo.getOpenIncident(targetId("target_api")));
-      expect(Option.isNone(open)).toBe(true); // healthy check closes/never opens
+      yield* Effect.gen(function*() {
+        const repo = yield* CheckRepository;
+        yield* runOnceEffect(
+          [target(), target({ enabled: false, id: "target_off" as TargetId })],
+          { queueCapacity: 8, workerCount: 2 },
+        );
+        const checks = yield* repo.listChecks();
+        expect(checks).toHaveLength(1);
+        const open = yield* repo.getOpenIncident(targetId("target_api"));
+        expect(Option.isNone(open)).toBe(true); // healthy check closes/never opens
+      }).pipe(Effect.provide(wired({ target_api: valid() })));
     }));
 
   it.effect("a worker defect fails the run promptly", () =>
     Effect.gen(function*() {
-      const repo = new InMemoryCheckRepository();
       const exit = yield* Effect.exit(
         runOnceEffect([target()], { queueCapacity: 8, workerCount: 1 }).pipe(
           Effect.provide(
             Layer.mergeAll(
               StatusStateLayer,
-              Layer.succeed(CheckRepository)(repo),
+              InMemoryLayer,
               Layer.succeed(ProbeClient)({
                 probe: () => Effect.die(new Error("boom")),
               }),
@@ -102,15 +100,20 @@ describe("scheduler", () => {
 
   it.effect("watchLoop repeats each target at its own interval", () =>
     Effect.gen(function*() {
-      const repo = new InMemoryCheckRepository();
-      const loop = watchLoopEffect([target({ interval: Duration.millis(50) })], {
-        queueCapacity: 8,
-        workerCount: 1,
-      }).pipe(Effect.provide(wired(repo, { target_api: valid() })));
-      const fiber = yield* Effect.forkScoped(loop);
-      yield* TestClock.adjust(200);
-      yield* Fiber.interrupt(fiber);
-      const checks = yield* Effect.tryPromise(() => repo.listChecks());
+      let checks: readonly unknown[] = [];
+      const loop = Effect.gen(function*() {
+        const repo = yield* CheckRepository;
+        const fiber = yield* Effect.forkScoped(
+          watchLoopEffect([target({ interval: Duration.millis(50) })], {
+            queueCapacity: 8,
+            workerCount: 1,
+          }),
+        );
+        yield* TestClock.adjust(200);
+        yield* Fiber.interrupt(fiber);
+        checks = yield* repo.listChecks();
+      }).pipe(Effect.provide(wired({ target_api: valid() })));
+      yield* loop;
       expect(checks.length).toBeGreaterThanOrEqual(2);
     }));
 });

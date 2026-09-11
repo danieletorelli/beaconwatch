@@ -1,31 +1,49 @@
-import { Duration, Option, Schema } from "effect";
-import { DatabaseSync } from "node:sqlite";
+import { Clock, Effect, Layer, Option, Schema } from "effect";
+import { Duration } from "effect";
+import { SqlClient, SqlError } from "effect/unstable/sql";
+import { SqliteClient } from "@effect/sql-sqlite-node";
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
-  CheckFailure,
   CheckResult,
+  CheckFailure,
   Down,
   Incident,
   InvalidResponse,
   ResponseMetadata,
   Slow,
-  Target,
   Unknown,
   Up,
+  Target,
   targetId,
-  type Classification,
   type TargetId,
 } from "../domain/schema.js";
+import { RepositoryError } from "../domain/errors.js";
 import {
-  InMemoryCheckRepository,
+  CheckRepository,
+  decideTransition,
   type CheckRepositoryShape,
   type IncidentTransition,
 } from "./CheckRepository.js";
-import { RepositoryError } from "../domain/errors.js";
+
+const repoError = (operation: string) => (cause: unknown) =>
+  new RepositoryError({ operation, cause });
+const conflicting = (id: string) =>
+  new RepositoryError({
+    operation: "saveCheck",
+    cause: `check id ${id} already has different contents`,
+  });
 const classes = { Up, Slow, Down, InvalidResponse, Unknown };
-type Row = Record<string, unknown>;
+
+export const makeTempFilename = () =>
+  join(
+    tmpdir(),
+    `beaconwatch-${process.pid}-${Date.now()}-${randomUUID()}.sqlite`,
+  );
+
+// ---------- Row codecs (SPEC 4.1: JSON row payloads).
+
 // Versioned duration codec: legacy numeric millisecond values plus tagged
 // millisecond/nanosecond and infinity encodings (SPEC 4.1). Unknown tags fail
 // as repository errors.
@@ -48,7 +66,8 @@ const decodeDuration = (x: unknown): Duration.Duration => {
 };
 const encodeDuration = (d: Duration.Duration): number | Record<string, unknown> =>
   Duration.match({
-    onMillis: (millis) => (Number.isInteger(millis) ? millis : { tag: "nanos", nanos: millis * 1_000_000 }),
+    onMillis: (millis) =>
+      Number.isInteger(millis) ? millis : { tag: "nanos", nanos: millis * 1_000_000 },
     onNanos: (nanos) => {
       const asMillis = Number(nanos) / 1_000_000;
       if (!Number.isFinite(asMillis))
@@ -61,253 +80,282 @@ const encodeDuration = (d: Duration.Duration): number | Record<string, unknown> 
     onInfinity: () => ({ tag: "infinity", direction: "positive" }),
     onNegativeInfinity: () => ({ tag: "infinity", direction: "negative" }),
   })(d);
-export const makeTempFilename = () =>
-  join(
-    tmpdir(),
-    `beaconwatch-${process.pid}-${Date.now()}-${randomUUID()}.sqlite`,
-  );
-export class SqliteCheckRepository implements CheckRepositoryShape {
-  readonly db: DatabaseSync;
-  private memory = new InMemoryCheckRepository();
-  constructor(
-    filename = ":memory:",
-    private readonly send: (eventId: number) => void | Promise<void> = () => {},
-  ) {
-    this.db = new DatabaseSync(filename);
-    this.migrate();
-  }
-  migrate() {
-    this.db.exec(
-      "create table if not exists targets(id text primary key,json text not null);create table if not exists checks(id text primary key,json text not null);create table if not exists incidents(id text primary key,json text not null);create table if not exists incident_events(id integer primary key autoincrement,incident_id text not null,check_id text not null,event_type text not null,created_at integer not null);create table if not exists delivery_outbox(id integer primary key autoincrement,event_id integer not null unique references incident_events(id),delivered_at integer)",
-    );
-  }
-  private target(s: string) {
-    // Targets persist in their schema-encoded form; decoding validates.
-    return Schema.decodeUnknownSync(Target)(JSON.parse(s));
-  }
-  private check(s: string) {
-    try {
-      // Persisted shape: Option fields appear as Some/None wrappers. They are
-      // normalized to the clean encoded shape here; the CheckResult schema
-      // then performs the full decode (brands, durations, dates).
-      const x = JSON.parse(s) as {
-        id: string;
-        targetId: string;
-        checkedAt: string;
-        duration: unknown;
-        classification: { _tag: string };
-        failure?: { _tag: string; value?: { reason: string } };
-        response?: {
-          status?: { _tag: string; value?: number };
-          bytes?: { _tag: string; value?: number };
-        };
-      };
-      return new CheckResult({
-        id: x.id as never,
-        targetId: targetId(x.targetId),
-        checkedAt: new Date(x.checkedAt),
-        duration: decodeDuration(x.duration),
-        classification: new classes[
-          x.classification._tag as keyof typeof classes
-        ](),
-        failure:
-          x.failure?._tag === "Some" && x.failure.value
-            ? Option.some(new CheckFailure({ reason: x.failure.value.reason }))
-            : Option.none(),
-        response: new ResponseMetadata({
-          status:
-            x.response?.status?._tag === "Some"
-              ? Option.some(x.response.status.value!)
-              : Option.none(),
-          bytes:
-            x.response?.bytes?._tag === "Some"
-              ? Option.some(x.response.bytes.value!)
-              : Option.none(),
-        }),
-      });
-    } catch (e) {
-      throw new RepositoryError({ operation: "check", cause: e });
-    }
-  }
-  private incident(s: string) {
-    try {
-      const x = JSON.parse(s) as {
-        id: string;
-        targetId: string;
-        openedAt: string;
-        status: "Open" | "Closed";
-        reason: string;
-        latestCheckId: string;
-        summary?: { _tag: string; value?: string };
-        closedAt?: { _tag: string; value?: string | number };
-      };
-      return new Incident({
-        id: x.id as never,
-        targetId: targetId(x.targetId),
-        openedAt: new Date(x.openedAt),
-        status: x.status,
-        reason: x.reason,
-        latestCheckId: x.latestCheckId,
-        summary:
-          x.summary?._tag === "Some"
-            ? Option.some(x.summary.value!)
-            : Option.none(),
-        closedAt:
-          x.closedAt?._tag === "Some"
-            ? Option.some(new Date(x.closedAt.value as string))
-            : Option.none(),
-      });
-    } catch (e) {
-      throw new RepositoryError({ operation: "incident", cause: e });
-    }
-  }
-  async saveTarget(t: Target) {
-    this.db
-      .prepare(
-        "insert into targets values(?,?) on conflict(id) do update set json=excluded.json",
-      )
-      .run(t.id, JSON.stringify(Schema.encodeSync(Target)(t)));
-  }
-  async listTargets() {
-    return (
-      this.db.prepare("select json from targets order by id").all() as Row[]
-    ).map((r) => this.target(String(r.json)));
-  }
-  async saveCheck(c: CheckResult) {
-    const row = this.db
-      .prepare("select json from checks where id=?")
-      .get(c.id) as Row | undefined;
-    if (row) {
-      const old = this.check(String(row.json));
-      if (JSON.stringify(old) !== JSON.stringify(c))
-        throw new RepositoryError({
-          operation: "saveCheck",
-          cause: "conflicting check id",
-        });
-      return;
-    }
-    this.db
-      .prepare("insert into checks values(?,?)")
-      .run(c.id, JSON.stringify({ ...c, duration: encodeDuration(c.duration) }));
-  }
-  async listChecks(id?: TargetId) {
-    const rows = (
-      id
-        ? this.db
-            .prepare(
-              "select json from checks where json_extract(json,'$.targetId')=? order by json_extract(json,'$.checkedAt'),id",
-            )
-            .all(id)
-        : this.db
-            .prepare(
-              "select json from checks order by json_extract(json,'$.checkedAt'),id",
-            )
-            .all()
-    ) as Row[];
-    return rows.map((r) => this.check(String(r.json)));
-  }
-  async getIncident(id: string): Promise<Option.Option<Incident>> {
-    const r = this.db
-      .prepare("select json from incidents where id=?")
-      .get(id) as Row | undefined;
-    return r ? Option.some(this.incident(String(r.json))) : Option.none();
-  }
-  async getOpenIncident(id: TargetId): Promise<Option.Option<Incident>> {
-    const r = this.db
-      .prepare(
-        "select json from incidents where json_extract(json,'$.targetId')=? and json_extract(json,'$.status')='Open' order by json_extract(json,'$.openedAt') desc,id desc limit 1",
-      )
-      .get(id) as Row | undefined;
-    return r ? Option.some(this.incident(String(r.json))) : Option.none();
-  }
-  async saveIncident(i: Incident) {
-    this.db
-      .prepare(
-        "insert into incidents values(?,?) on conflict(id) do update set json=excluded.json",
-      )
-      .run(i.id, JSON.stringify(i));
-  }
-  private tail: Promise<unknown> = Promise.resolve();
-  // Transitions are serialized against concurrent applyCheck calls so the
-  // single SQLite connection never nests transactions (SPEC 4.2).
-  async applyCheck(c: CheckResult): Promise<IncidentTransition> {
-    const run = () => this.applyCheckTransaction(c);
-    const result = this.tail.then(run, run);
-    this.tail = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    return result.then(async ({ transition, pendingEvents }) => {
-      // External delivery starts only after the transaction has committed.
-      for (const eventId of pendingEvents) await this.send(eventId);
-      return transition;
+
+const encodeCheck = (c: CheckResult) =>
+  JSON.stringify({
+    id: c.id,
+    targetId: c.targetId,
+    checkedAt: c.checkedAt.toISOString(),
+    duration: encodeDuration(c.duration),
+    classification: { _tag: c.classification._tag },
+    ...(Option.isSome(c.failure)
+      ? { failure: { reason: c.failure.value.reason } }
+      : {}),
+    response: {
+      ...(Option.isSome(c.response.status) ? { status: c.response.status.value } : {}),
+      ...(Option.isSome(c.response.bytes) ? { bytes: c.response.bytes.value } : {}),
+    },
+  });
+
+const decodeCheck = (s: string) => {
+  try {
+    const x = JSON.parse(s) as {
+      id: string;
+      targetId: string;
+      checkedAt: string;
+      duration: unknown;
+      classification: { _tag: string };
+      failure?: { reason: string };
+      response?: { status?: number; bytes?: number };
+    };
+    return new CheckResult({
+      id: x.id as never,
+      targetId: targetId(x.targetId),
+      checkedAt: new Date(x.checkedAt),
+      duration: decodeDuration(x.duration),
+      classification: new classes[
+        x.classification._tag as keyof typeof classes
+      ](),
+      failure: x.failure
+        ? Option.some(new CheckFailure({ reason: x.failure.reason }))
+        : Option.none(),
+      response: new ResponseMetadata({
+        status: x.response?.status === undefined ? Option.none() : Option.some(x.response.status),
+        bytes: x.response?.bytes === undefined ? Option.none() : Option.some(x.response.bytes),
+      }),
     });
+  } catch (e) {
+    throw new RepositoryError({ operation: "check", cause: e });
   }
-  private async applyCheckTransaction(
-    c: CheckResult,
-  ): Promise<{ transition: IncidentTransition; pendingEvents: number[] }> {
-    // Project only this target's rows into the in-memory transition engine
-    // instead of reloading the entire database on every call.
-    for (const x of await this.listChecks(c.targetId))
-      await this.memory.saveCheck(x);
-    for (const r of this.db
-      .prepare(
-        "select json from incidents where json_extract(json,'$.targetId')=?",
-      )
-      .all(String(c.targetId)) as Row[])
-      await this.memory.saveIncident(this.incident(String(r.json)));
-    const transition = await this.memory.applyCheck(c);
-    const pendingEvents: number[] = [];
-    this.db.exec("begin");
-    try {
-      await this.saveCheck(c);
-      const openResult = await this.memory.getOpenIncident(c.targetId);
-      if (Option.isSome(openResult)) await this.saveIncident(openResult.value);
-      if (transition === "Closed") {
-        for (const row of this.db
-          .prepare(
-            "select json from incidents where json_extract(json,'$.targetId')=?",
-          )
-          .all(String(c.targetId)) as Row[]) {
-          const i = this.incident(String(row.json));
-          const updatedResult = await this.memory.getIncident(i.id);
-          if (Option.isSome(updatedResult)) await this.saveIncident(updatedResult.value);
-        }
+};
+
+const encodeIncident = (i: Incident) =>
+  JSON.stringify({
+    id: i.id,
+    targetId: i.targetId,
+    openedAt: i.openedAt.toISOString(),
+    status: i.status,
+    reason: i.reason,
+    latestCheckId: i.latestCheckId,
+    ...(Option.isSome(i.summary) ? { summary: i.summary.value } : {}),
+    ...(Option.isSome(i.closedAt) ? { closedAt: i.closedAt.value.toISOString() } : {}),
+  });
+
+const decodeIncident = (s: string) => {
+  try {
+    const x = JSON.parse(s) as {
+      id: string;
+      targetId: string;
+      openedAt: string;
+      status: "Open" | "Closed";
+      reason: string;
+      latestCheckId: string;
+      summary?: string;
+      closedAt?: string;
+    };
+    return new Incident({
+      id: x.id as never,
+      targetId: targetId(x.targetId),
+      openedAt: new Date(x.openedAt),
+      status: x.status,
+      reason: x.reason,
+      latestCheckId: x.latestCheckId,
+      summary: x.summary === undefined ? Option.none() : Option.some(x.summary),
+      closedAt: x.closedAt === undefined ? Option.none() : Option.some(new Date(x.closedAt)),
+    });
+  } catch (e) {
+    throw new RepositoryError({ operation: "incident", cause: e });
+  }
+};
+
+// ---------- Repository layer.
+
+/**
+ * SQLite repository: the same public semantics as the volatile repository
+ * (SPEC 4.1/4.2), with an incident_events row and a delivery-outbox row
+ * written inside the commit transaction, and external delivery starting only
+ * after the transaction has committed (SPEC 4.3).
+ */
+const makeRepo = (
+  sql: SqlClient.SqlClient,
+  send: (eventId: number) => void | Promise<void>,
+): CheckRepositoryShape => {
+  const migrate = Effect.gen(function*() {
+    yield* sql`create table if not exists targets (id text primary key, json text not null)`;
+    yield* sql`create table if not exists checks (id text primary key, json text not null)`;
+    yield* sql`create table if not exists incidents (id text primary key, json text not null)`;
+    yield* sql`create table if not exists incident_events (id integer primary key autoincrement, incident_id text not null, check_id text not null, event_type text not null, created_at integer not null)`;
+    yield* sql`create table if not exists delivery_outbox (id integer primary key autoincrement, event_id integer not null unique references incident_events(id), delivered_at integer)`;
+  }).pipe(Effect.mapError(repoError("migrate")));
+
+  const saveTarget = (t: Target) =>
+    sql`insert into targets (id, json) values (${t.id}, ${JSON.stringify(Schema.encodeSync(Target)(t))}) on conflict(id) do update set json = excluded.json`
+      .pipe(Effect.asVoid, Effect.mapError(repoError("saveTarget")));
+
+  const listTargets = Effect.gen(function*() {
+    const rows = yield* sql<{ json: string }>`select json from targets order by id`;
+    return yield* Effect.try(() =>
+      rows.map((r) =>
+        // Targets persist in their schema-encoded form; decoding validates.
+        Schema.decodeUnknownSync(Target)(JSON.parse(String(r.json))),
+      ),
+    ).pipe(Effect.mapError(repoError("listTargets")));
+  });
+
+  const saveCheck = (c: CheckResult) =>
+    Effect.gen(function*() {
+      const rows = yield* sql<{ json: string }>`select json from checks where id = ${c.id} limit 1`;
+      if (rows[0] !== undefined) {
+        const old = decodeCheck(String(rows[0].json));
+        if (JSON.stringify(old) !== JSON.stringify(c))
+          return yield* Effect.fail(conflicting(String(c.id)));
+        return;
       }
-      if (transition !== "Unchanged") {
-        const incidents = this.db.prepare("select id from incidents where json_extract(json,'$.latestCheckId')=? order by id").all(c.id) as Row[];
-        for (const incident of incidents) {
-          for (let attempt = 0; attempt < 2; attempt++) {
-            try {
-              const event = this.db.prepare("insert into incident_events(incident_id,check_id,event_type,created_at) values(?,?,?,?) returning id")
-                .get(String(incident.id), c.id, transition, Date.now()) as { id: number };
-              this.db.prepare("insert into delivery_outbox(event_id) values(?)").run(event.id);
-              pendingEvents.push(event.id);
-              break;
-            } catch (error) {
-              if (attempt === 1) throw error;
+      yield* sql`insert into checks (id, json) values (${c.id}, ${encodeCheck(c)})`;
+    }).pipe(Effect.mapError((e: unknown) => e instanceof RepositoryError ? e : repoError("saveCheck")(e)));
+
+  const listChecks = (id?: TargetId) =>
+    Effect.gen(function*() {
+      const rows = id
+        ? yield* sql<{ json: string }>`select json from checks where json_extract(json,'$.targetId') = ${id} order by json_extract(json,'$.checkedAt'), id`
+        : yield* sql<{ json: string }>`select json from checks order by json_extract(json,'$.checkedAt'), id`;
+      return yield* Effect.try(() => rows.map((r) => decodeCheck(String(r.json))));
+    }).pipe(Effect.mapError((e: unknown) => e instanceof RepositoryError ? e : repoError("listChecks")(e)));
+
+  const getIncident = (id: string) =>
+    Effect.gen(function*() {
+      const rows = yield* sql<{ json: string }>`select json from incidents where id = ${id} limit 1`;
+      return rows[0] === undefined ? Option.none() : Option.some(decodeIncident(String(rows[0].json)));
+    }).pipe(Effect.mapError(repoError("getIncident")));
+
+  const getOpenIncident = (id: TargetId) =>
+    Effect.gen(function*() {
+      const rows = yield* sql<{ json: string }>`select json from incidents where json_extract(json,'$.targetId') = ${id} and json_extract(json,'$.status') = 'Open' order by json_extract(json,'$.openedAt') desc, id desc limit 1`;
+      return rows[0] === undefined ? Option.none() : Option.some(decodeIncident(String(rows[0].json)));
+    }).pipe(Effect.mapError(repoError("getOpenIncident")));
+
+  const saveIncident = (i: Incident) =>
+    sql`insert into incidents (id, json) values (${i.id}, ${encodeIncident(i)}) on conflict(id) do update set json = excluded.json`
+      .pipe(Effect.asVoid, Effect.mapError(repoError("saveIncident")));
+
+  const applyCheck = (c: CheckResult) =>
+    Effect.flatMap(Clock.currentTimeMillis, (now) =>
+      sql.withTransaction(
+        Effect.gen(function*() {
+          const existingRows = yield* sql<{ json: string }>`select json from checks where id = ${c.id} limit 1`;
+          if (existingRows[0] !== undefined) {
+            const existing = decodeCheck(String(existingRows[0].json));
+            if (JSON.stringify(existing) !== JSON.stringify(c))
+              return yield* Effect.fail(conflicting(String(c.id)));
+            return {
+              transition: "Unchanged" as IncidentTransition,
+              eventIds: [] as number[],
+            };
+          }
+          const targetChecks = (yield* sql<{ json: string }>`select json from checks where json_extract(json,'$.targetId') = ${String(c.targetId)}`)
+            .map((r) => decodeCheck(String(r.json)))
+            .filter((x) => x.id !== c.id);
+          const targetIncidents = (yield* sql<{ json: string }>`select json from incidents where json_extract(json,'$.targetId') = ${String(c.targetId)}`)
+            .map((r) => decodeIncident(String(r.json)));
+          const outcome = decideTransition({
+            targetChecks,
+            targetIncidents,
+            check: c,
+            now,
+          });
+          yield* sql`insert into checks (id, json) values (${c.id}, ${encodeCheck(c)})`;
+          for (const incident of outcome.incidents)
+            yield* sql`insert into incidents (id, json) values (${incident.id}, ${encodeIncident(incident)}) on conflict(id) do update set json = excluded.json`;
+          const eventIds: number[] = [];
+          if (outcome.transition !== "Unchanged") {
+            for (const incident of outcome.incidents) {
+              const event = yield* sql<{ id: number }>`insert into incident_events (incident_id, check_id, event_type, created_at) values (${incident.id}, ${c.id}, ${outcome.transition}, ${now}) returning id`;
+              const eventId = Number(event[0]?.id ?? -1);
+              yield* sql`insert into delivery_outbox (event_id) values (${eventId})`;
+              eventIds.push(eventId);
             }
           }
-        }
+          return { transition: outcome.transition, eventIds };
+        }),
+      ).pipe(
+        Effect.mapError((e: unknown) =>
+          e instanceof RepositoryError ? e : repoError("applyCheck")(e),
+        ),
+      ),
+    ).pipe(
+      Effect.flatMap(({ transition, eventIds }) =>
+        eventIds.length === 0
+          ? Effect.succeed(transition)
+          : Effect.forEach(
+              eventIds,
+              (eventId) =>
+                Effect.tryPromise({
+                  try: () => Promise.resolve(send(eventId)),
+                  catch: (e) => repoError("deliver")(e),
+                }),
+              { discard: true },
+            ).pipe(Effect.as(transition)),
+      ),
+    );
+
+  const pendingEvents = Effect.gen(function*() {
+    const rows = yield* sql<{ id: number; event_id: number }>`select id, event_id from delivery_outbox where delivered_at is null order by id`;
+    return rows.map((r) => ({ id: Number(r.id), eventId: Number(r.event_id) }));
+  }).pipe(Effect.mapError(repoError("deliverPending")));
+
+  const deliverPending = (deliver: (eventId: number) => void | Promise<void>) =>
+    Effect.gen(function*() {
+      const rows = yield* pendingEvents;
+      for (const row of rows) {
+        yield* Effect.tryPromise({
+          try: () => Promise.resolve(deliver(row.eventId)),
+          catch: (e) => repoError("deliver")(e),
+        });
+        yield* sql`update delivery_outbox set delivered_at = ${Date.now()} where id = ${row.id} and delivered_at is null`;
       }
-      this.db.exec("commit");
-    } catch (error) {
-      this.db.exec("rollback");
-      throw error;
-    }
-    return { transition, pendingEvents };
-  }
-  async deliverPending(send: (eventId: number) => void | Promise<void>) {
-    const rows = this.db.prepare("select id,event_id from delivery_outbox where delivered_at is null order by id").all() as Array<{ id: number; event_id: number }>;
-    for (const row of rows) {
-      await send(row.event_id);
-      this.db.prepare("update delivery_outbox set delivered_at=? where id=? and delivered_at is null").run(Date.now(), row.id);
-    }
-  }
-  close() {
-    this.db.close();
-  }
-}
-export const migrate = (r: SqliteCheckRepository) => r.migrate();
-export const layerForFile = (f: string) => new SqliteCheckRepository(f);
-export const tempLayer = () => layerForFile(makeTempFilename());
+    }).pipe(Effect.mapError((e: unknown) => e instanceof RepositoryError ? e : repoError("deliver")(e)));
+
+  return {
+    saveTarget,
+    listTargets: () => listTargets,
+    saveCheck,
+    listChecks,
+    getIncident,
+    getOpenIncident,
+    saveIncident,
+    applyCheck,
+    migrate,
+    pendingEvents: () => pendingEvents,
+    deliverPending,
+  } as CheckRepositoryShape;
+};
+
+export type SqliteRepo = CheckRepositoryShape & {
+  readonly migrate: Effect.Effect<void, RepositoryError>;
+  readonly pendingEvents: () => Effect.Effect<
+    ReadonlyArray<{ id: number; eventId: number }>,
+    RepositoryError
+  >;
+  readonly deliverPending: (
+    deliver: (eventId: number) => void | Promise<void>,
+  ) => Effect.Effect<void, RepositoryError>;
+};
+
+export const layerForFile = (
+  filename: string,
+  send: (eventId: number) => void | Promise<void> = () => {},
+): Layer.Layer<CheckRepository | SqlClient.SqlClient, never, never> =>
+  Layer.provideMerge(
+    Layer.effect(CheckRepository)(
+      Effect.gen(function*() {
+        const sql = yield* SqlClient.SqlClient;
+        const repo = makeRepo(sql, send);
+        yield* repo.migrate;
+        return repo;
+      }),
+    ),
+    SqliteClient.layer({ filename }),
+  );
+
+export const tempLayer = (send?: (eventId: number) => void | Promise<void>) =>
+  layerForFile(makeTempFilename(), send);

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
 import { Duration, Effect, Option } from "effect";
 import type { Server } from "node:http";
-import { InMemoryCheckRepository } from "../src/repo/CheckRepository.js";
+import { CheckRepository, InMemoryLayer } from "../src/repo/CheckRepository.js";
 import type { TargetId } from "../src/domain/schema.js";
 import {
   CheckResult,
@@ -41,23 +41,15 @@ const makeTarget = () =>
 
 // Repository that fails every read, so any premature lookup turns into a 500.
 const brokenRepo = {
-  saveTarget: async () => {},
-  listTargets: async () => {
-    throw new Error("secret database detail");
-  },
-  saveCheck: async () => {},
-  listChecks: async () => {
-    throw new Error("secret database detail");
-  },
-  getIncident: async () => {
-    throw new Error("secret database detail");
-  },
-  getOpenIncident: async () => {
-    throw new Error("secret database detail");
-  },
-  saveIncident: async () => {},
-  applyCheck: async () => "Unchanged" as const,
-};
+  saveTarget: () => Effect.void,
+  listTargets: () => Effect.fail(new Error("secret database detail")),
+  saveCheck: () => Effect.void,
+  listChecks: () => Effect.fail(new Error("secret database detail")),
+  getIncident: () => Effect.fail(new Error("secret database detail")),
+  getOpenIncident: () => Effect.fail(new Error("secret database detail")),
+  saveIncident: () => Effect.void,
+  applyCheck: () => Effect.succeed("Unchanged" as const),
+} as never;
 
 const serve = async (repo: unknown) => {
   const { server, baseUrl } = await startServer(repo as never);
@@ -97,20 +89,24 @@ describe("api error mapping (BUGS 10.1, 10.2, 19.1)", () => {
   });
 
   it("serves openapi.json, 404s unknown routes and absent incidents", async () => {
-    const repo = new InMemoryCheckRepository();
-    await repo.saveTarget(makeTarget());
-    await repo.saveCheck(check("check_1", "Down"));
-    await repo.saveIncident(
-      new Incident({
-        id: "incident_ok" as IncidentId,
-        targetId: targetId("target_api"),
-        openedAt: new Date(100),
-        status: "Open",
-        reason: "Down",
-        latestCheckId: "check_1",
-        summary: Option.none(),
-        closedAt: Option.none(),
-      }),
+    const repo = await Effect.runPromise(
+      Effect.map(CheckRepository, (r) => r).pipe(Effect.provide(InMemoryLayer)),
+    );
+    await Effect.runPromise(repo.saveTarget(makeTarget()));
+    await Effect.runPromise(repo.saveCheck(check("check_1", "Down")));
+    await Effect.runPromise(
+      repo.saveIncident(
+        new Incident({
+          id: "incident_ok" as IncidentId,
+          targetId: targetId("target_api"),
+          openedAt: new Date(100),
+          status: "Open",
+          reason: "Down",
+          latestCheckId: "check_1",
+          summary: Option.none(),
+          closedAt: Option.none(),
+        }),
+      ),
     );
     const { baseUrl, close } = await serve(repo);
     try {
@@ -127,8 +123,10 @@ describe("api error mapping (BUGS 10.1, 10.2, 19.1)", () => {
   });
 
   it("exposes targets as DTO fields only", async () => {
-    const repo = new InMemoryCheckRepository();
-    await repo.saveTarget(makeTarget());
+    const repo = await Effect.runPromise(
+      Effect.map(CheckRepository, (r) => r).pipe(Effect.provide(InMemoryLayer)),
+    );
+    await Effect.runPromise(repo.saveTarget(makeTarget()));
     const { baseUrl, close } = await serve(repo);
     try {
       const res = await fetch(`${baseUrl}/targets`);

@@ -1,5 +1,5 @@
 import { Effect, Schedule } from "effect";
-import { ConfigError, type DomainError, type RepositoryError } from "../domain/errors.js";
+import { ConfigError, type DomainError } from "../domain/errors.js";
 import type { Target, TargetConfig } from "../domain/schema.js";
 import { probeOnce } from "../probe/ProbeProgram.js";
 import { recordCheckMetricsEffect } from "../obs/Telemetry.js";
@@ -29,14 +29,14 @@ const enabled = (t: Target | TargetConfig) => !("enabled" in t) || t.enabled;
 // at a boundary instead of passing services through every call.
 const checkPipeline = (
   target: Target | TargetConfig,
-): Effect.Effect<void, DomainError | RepositoryError, ProbeClient | CheckRepository | StatusState> =>
+): Effect.Effect<void, DomainError, ProbeClient | CheckRepository | StatusState> =>
   Effect.gen(function*() {
     const client = yield* ProbeClient;
     const repository = yield* CheckRepository;
     const status = yield* StatusState;
     const check = yield* probeOnce(target, client);
-    yield* Effect.tryPromise({ try: () => repository.applyCheck(check), catch: (e) => e as RepositoryError });
-    const open = yield* Effect.tryPromise({ try: () => repository.getOpenIncident(check.targetId), catch: (e) => e as RepositoryError });
+    yield* repository.applyCheck(check);
+    const open = yield* repository.getOpenIncident(check.targetId);
     yield* status.update(check, open);
     yield* recordCheckMetricsEffect(check);
   }).pipe(Effect.annotateLogs("target_id", target.id));
@@ -44,7 +44,7 @@ const checkPipeline = (
 export const runOnceEffect = (
   targets: readonly (Target | TargetConfig)[],
   options: SchedulerOptions,
-): Effect.Effect<void, DomainError | RepositoryError, ProbeClient | CheckRepository | StatusState> =>
+): Effect.Effect<void, DomainError, ProbeClient | CheckRepository | StatusState> =>
   Effect.gen(function*() {
     yield* validateOptions(options);
     const queue = targets.filter(enabled);
@@ -57,7 +57,7 @@ export const runOnceEffect = (
 export const watchLoopEffect = (
   targets: readonly (Target | TargetConfig)[],
   options: SchedulerOptions,
-): Effect.Effect<void, DomainError | RepositoryError, ProbeClient | CheckRepository | StatusState> =>
+): Effect.Effect<void, DomainError, ProbeClient | CheckRepository | StatusState> =>
   Effect.gen(function*() {
     yield* validateOptions(options);
     const active = targets.filter(enabled);
@@ -67,4 +67,4 @@ export const watchLoopEffect = (
       (target) => Effect.repeat(checkPipeline(target), Schedule.spaced(target.interval)),
       { concurrency: options.workerCount },
     );
-  }) as Effect.Effect<void, DomainError | RepositoryError, ProbeClient | CheckRepository | StatusState>;
+  }) as Effect.Effect<void, DomainError, ProbeClient | CheckRepository | StatusState>;

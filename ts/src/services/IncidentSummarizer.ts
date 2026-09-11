@@ -32,3 +32,10 @@ export const Fake = (s: Script = "valid"): IncidentSummarizerShape => ({
     });
   },
 });
+
+// ---------- Service tag and layer.
+
+import { Context, Layer } from "effect";
+export class IncidentSummarizer extends Context.Service<IncidentSummarizer, IncidentSummarizerShape>()("beaconwatch/IncidentSummarizer") {}
+export const FakeLayer = (script: Script = "valid") =>
+  Layer.succeed(IncidentSummarizer)(Fake(script));

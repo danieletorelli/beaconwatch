@@ -9,7 +9,7 @@ import {
   targetId,
   type TargetId,
 } from "../src/domain/schema.js";
-import { InMemoryCheckRepository } from "../src/repo/CheckRepository.js";
+import { CheckRepository, InMemoryLayer } from "../src/repo/CheckRepository.js";
 import {
   FakeProbeClient,
   recoverAfter,
@@ -155,13 +155,13 @@ describe("probe workflow", () => {
 describe("probe repository integration", () => {
   it.effect("a failing probe opens an incident through the repository", () =>
     Effect.gen(function*() {
-      const repo = new InMemoryCheckRepository();
+      const repo = yield* CheckRepository;
       const client = new FakeProbeClient({ target_api: valid(500) });
       const check = yield* probeOnce(target(), client);
-      yield* Effect.tryPromise(() => repo.applyCheck(check));
-      const open = yield* Effect.tryPromise(() => repo.getOpenIncident(check.targetId));
+      yield* repo.applyCheck(check);
+      const open = yield* repo.getOpenIncident(check.targetId);
       expect(Option.isSome(open)).toBe(true);
-    }));
+    }).pipe(Effect.provide(InMemoryLayer)));
 });
 
 describe("probe client validation (BUGS 13.7)", () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Duration, Effect, Option, Result } from "effect";
+import { Duration, Effect, Layer, Option, Result } from "effect";
 import {
   CheckFailure,
   CheckResult,
@@ -16,7 +16,8 @@ import {
   type TargetId,
 } from "../src/domain/schema.js";
 import { targetJsonSchemaDocument } from "../src/domain/json-schema.js";
-import { IncidentService } from "../src/services/IncidentService.js";
+import { IncidentService, IncidentServiceLive } from "../src/services/IncidentService.js";
+import { CheckRepository, InMemoryLayer } from "../src/repo/CheckRepository.js";
 import { classifyDomainError } from "../src/domain/classify-match.js";
 import { classifyProbe, formatIncidentWindow, renameCheck } from "../src/domain/values.js";
 import { durationMillis } from "../src/domain/schema.js";
@@ -246,46 +247,51 @@ describe("json-schema artifact (BUGS 12.5)", () => {
 });
 
 describe("incident service (BUGS 4.1)", () => {
-  it("acknowledge returns a settled effect that propagates repository failure", async () => {
-    const failing = {
-      saveTarget: async () => {},
-      listTargets: async () => [],
-      saveCheck: async () => {},
-      listChecks: async () => [],
-      getIncident: async () => Option.none(),
-      getOpenIncident: async () => Option.none(),
-      saveIncident: async () => {},
-      applyCheck: async () => {
-        throw new Error("repository down");
-      },
-    };
-    const service = new IncidentService(failing as never);
-    const check = new CheckResult({
-      id: "check_1" as CheckId,
-      targetId: targetId("target_api"),
-      checkedAt: new Date(0),
-      duration: Duration.millis(1),
-      classification: new Down(),
-      failure: Option.none(),
-      response: new ResponseMetadata({ status: Option.some(200), bytes: Option.none() }),
-    });
-    const outcome = await Effect.runPromise(Effect.result(service.acknowledge(check)));
-    expect(Result.isFailure(outcome)).toBe(true);
-    if (Result.isFailure(outcome)) expect(String(outcome.failure)).toContain("repository down");
-  });
+  it.effect("acknowledge returns a settled effect that propagates repository failure (BUGS 4.1)", () =>
+    Effect.gen(function*() {
+      const service = yield* IncidentService;
+      const check = new CheckResult({
+        id: "check_1" as CheckId,
+        targetId: targetId("target_api"),
+        checkedAt: new Date(0),
+        duration: Duration.millis(1),
+        classification: new Down(),
+        failure: Option.none(),
+        response: new ResponseMetadata({ status: Option.some(200), bytes: Option.none() }),
+      });
+      const outcome = yield* Effect.result(service.acknowledge(check));
+      expect(Result.isFailure(outcome)).toBe(true);
+      if (Result.isFailure(outcome))
+        expect(String((outcome.failure as { cause: unknown }).cause)).toContain("repository down");
+    }).pipe(
+      Effect.provide(Layer.provide(
+        IncidentServiceLive,
+        Layer.succeed(CheckRepository)({
+          saveTarget: Effect.void,
+          listTargets: Effect.succeed([]),
+          saveCheck: Effect.void,
+          listChecks: Effect.succeed([]),
+          getIncident: Effect.succeed(Option.none()),
+          getOpenIncident: Effect.succeed(Option.none()),
+          saveIncident: Effect.void,
+          applyCheck: () =>
+            Effect.fail(new RepositoryError({ operation: "x", cause: "repository down" })),
+        } as never),
+      )),
+    ));
 
-  it("acknowledge succeeds and returns the transition", async () => {
-    const repo = new (await import("../src/repo/CheckRepository.js")).InMemoryCheckRepository();
-    const service = new IncidentService(repo);
-    const check = new CheckResult({
-      id: "check_1" as CheckId,
-      targetId: targetId("target_api"),
-      checkedAt: new Date(0),
-      duration: Duration.millis(1),
-      classification: new Down(),
-      failure: Option.none(),
-      response: new ResponseMetadata({ status: Option.some(200), bytes: Option.none() }),
-    });
-    expect(await Effect.runPromise(service.acknowledge(check))).toBe("Opened");
-  });
+  it.effect("acknowledge succeeds and returns the transition", () =>
+    Effect.gen(function*() {
+      const service = yield* IncidentService;
+      const check = new CheckResult({
+        id: "check_1" as CheckId,
+        targetId: targetId("target_api"),
+        checkedAt: new Date(0),
+        duration: Duration.millis(1),
+        classification: new Down(),
+        failure: Option.none(),
+        response: new ResponseMetadata({ status: Option.some(200), bytes: Option.none() }),
+      });
+      expect(yield* service.acknowledge(check)).toBe("Opened");
+    }).pipe(Effect.provide(Layer.provide(IncidentServiceLive, InMemoryLayer))));
 });

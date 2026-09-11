@@ -1,19 +1,27 @@
-import { Effect } from "effect";
+import { Context, Effect, Layer } from "effect";
 import type { CheckResult } from "../domain/schema.js";
-import type {
-  CheckRepositoryShape,
-  IncidentTransition,
-} from "../repo/CheckRepository.js";
-export class IncidentService {
-  constructor(private repo: CheckRepositoryShape) {}
-  applyCheck(check: CheckResult): Promise<IncidentTransition> {
-    return this.repo.applyCheck(check);
-  }
-  acknowledge(check: CheckResult): Effect.Effect<IncidentTransition, Error> {
-    return Effect.tryPromise({
-      try: () => this.repo.applyCheck(check),
-      catch: (e) => e as Error,
-    });
-  }
+import type { IncidentTransition } from "../repo/CheckRepository.js";
+import { CheckRepository } from "../repo/CheckRepository.js";
+import { RepositoryError } from "../domain/errors.js";
+
+export interface IncidentServiceShape {
+  readonly applyCheck: (
+    check: CheckResult,
+  ) => Effect.Effect<IncidentTransition, RepositoryError>;
+  readonly acknowledge: (
+    check: CheckResult,
+  ) => Effect.Effect<IncidentTransition, RepositoryError>;
 }
-export const Live = (repo: CheckRepositoryShape) => new IncidentService(repo);
+export class IncidentService extends Context.Service<IncidentService, IncidentServiceShape>()("beaconwatch/IncidentService") {}
+
+export const IncidentServiceLive = Layer.effect(IncidentService)(
+  Effect.gen(function*() {
+    const repo = yield* CheckRepository;
+    return {
+      applyCheck: (check) => repo.applyCheck(check),
+      // Acknowledging a check is a settled effect: the repository failure is
+      // typed, never discarded (BUGS 4.1).
+      acknowledge: (check) => repo.applyCheck(check),
+    };
+  }),
+);

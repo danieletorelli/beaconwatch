@@ -1,25 +1,25 @@
-import { InMemoryCheckRepository } from "../repo/CheckRepository.js";
-import { IncidentService } from "../services/IncidentService.js";
-import { Fake } from "../services/IncidentSummarizer.js";
-export class ManagedAppRuntime {
-  static acquired = 0;
-  static released = 0;
-  readonly repository = new InMemoryCheckRepository();
-  readonly incidents = new IncidentService(this.repository);
-  readonly summarizer = Fake();
-  private disposed = false;
-  constructor() { ManagedAppRuntime.acquired++; }
-  async runPromise<A>(work: (services: this) => Promise<A>) {
-    if (this.disposed) throw new Error("runtime disposed");
-    return work(this);
-  }
-  async dispose() {
-    if (!this.disposed) ManagedAppRuntime.released++;
-    this.disposed = true;
-  }
-}
-export const runtime = new ManagedAppRuntime();
-export const runPromise = <A>(work: (s: ManagedAppRuntime) => Promise<A>) =>
-  runtime.runPromise(work);
+import { Effect, Layer, ManagedRuntime } from "effect";
+import { InMemoryLayer as CheckRepositoryInMemory } from "../repo/CheckRepository.js";
+import { IncidentServiceLive } from "../services/IncidentService.js";
+import { FakeLayer as IncidentSummarizerFakeLayer } from "../services/IncidentSummarizer.js";
+
+/**
+ * Part 15 — the single application boundary.
+ *
+ * Everything the app needs is wired into ONE layer here; the program is an
+ * ordinary `Effect` value. Nothing runs at import time — `src/bin.ts` is the
+ * only place that hands programs to the runtime. That keeps the wiring
+ * testable while the process edge stays a tiny untested boundary.
+ */
+export const AppLayer = Layer.mergeAll(
+  CheckRepositoryInMemory,
+  // The service consumes the repository from its R channel; the volatile
+  // implementation is provided to it and kept in the composition.
+  Layer.provide(IncidentServiceLive, CheckRepositoryInMemory),
+  IncidentSummarizerFakeLayer(),
+);
+export const runtime = ManagedRuntime.make(AppLayer);
+export const runPromise = <A, E>(
+  effect: Effect.Effect<A, E, never>,
+): Promise<A> => runtime.runPromise(effect);
 export const dispose = () => runtime.dispose();
-export const AppLayer = runtime;
