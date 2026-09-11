@@ -23,46 +23,6 @@ const validate = (o: SchedulerOptions) => {
     throw new ConfigError({ reason: "workerCount must be a positive integer" });
 };
 const enabled = (t: Target | TargetConfig) => !("enabled" in t) || t.enabled;
-export async function runOnce(
-  targets: readonly (Target | TargetConfig)[],
-  options: SchedulerOptions,
-  s: SchedulerServices,
-  _signal?: AbortSignal,
-) {
-  validate(options);
-  const queue = targets.filter(enabled).slice();
-  const worker = async (target: Target | TargetConfig) => {
-      const check = await Effect.runPromise(probeOnce(target, s.client));
-      await s.repository.applyCheck(check);
-      await s.status.update(
-        check,
-        await s.repository.getOpenIncident(check.targetId),
-      );
-  };
-  await Promise.all(queue.map(worker));
-}
-export async function watchLoop(
-  targets: readonly (Target | TargetConfig)[],
-  options: SchedulerOptions,
-  s: SchedulerServices,
-  signal: AbortSignal,
-) {
-  validate(options);
-  const active = targets.filter(enabled);
-  while (!signal.aborted) {
-    await runOnce(active, options, s, signal);
-    await new Promise<void>((r) => {
-      const wait = Math.min(...active.map((t) => t.interval));
-      const timer = setTimeout(r, wait);
-    });
-  }
-}
-export const startWatching = (targets: readonly (Target | TargetConfig)[], options: SchedulerOptions, s: SchedulerServices) => {
-  const controller = new AbortController();
-  void watchLoop(targets, options, s, controller.signal);
-  return controller;
-};
-export const Live = { runOnce, watchLoop };
 
 export const runOnceEffect = (
   targets: readonly (Target | TargetConfig)[],

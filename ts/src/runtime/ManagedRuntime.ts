@@ -19,30 +19,6 @@ export class ManagedAppRuntime {
   }
 }
 export const runtime = new ManagedAppRuntime();
-export const runtimeForRequest = () => new ManagedAppRuntime();
-export const runRequestChild = async <A>(
-  runtime: ManagedAppRuntime,
-  work: (services: ManagedAppRuntime, signal: AbortSignal) => Promise<A>,
-  signal: AbortSignal,
-) => {
-  const child = new AbortController();
-  const running = runtime.runPromise((services) => work(services, child.signal));
-  const cancelled = new Promise<never>((_, reject) => {
-    signal.addEventListener("abort", () => reject(signal.reason), { once: true });
-  });
-  return Promise.race([running, cancelled]);
-};
-export class RequestRuntimeHost {
-  private runtimes = new Set<ManagedAppRuntime>();
-  async handle<A>(work: (s: ManagedAppRuntime, signal: AbortSignal) => Promise<A>, signal = new AbortController().signal) {
-    const requestRuntime = runtimeForRequest();
-    this.runtimes.add(requestRuntime);
-    return runRequestChild(requestRuntime, work, signal);
-  }
-  async shutdown() {
-    await runtime.dispose();
-  }
-}
 export const runPromise = <A>(work: (s: ManagedAppRuntime) => Promise<A>) =>
   runtime.runPromise(work);
 export const dispose = () => runtime.dispose();
