@@ -1,5 +1,5 @@
 import AjvModule from "ajv";
-import { Effect, Option, Result, Schedule } from "effect";
+import { Clock, Effect, Option, Result, Schedule } from "effect";
 import { randomUUID } from "node:crypto";
 import {
   CheckFailure,
@@ -41,7 +41,7 @@ export const probeOnce = (
   Effect.gen(function*() {
     if ("enabled" in target && !target.enabled)
       return yield* Effect.fail(new TargetDisabled({ targetId: target.id }));
-    const start = Date.now();
+    const start = yield* Clock.currentTimeMillis;
     let raw: RawProbeResponse | undefined;
     let failure: DomainError | undefined;
     for (let attempt = 0; attempt < 4; attempt++) {
@@ -60,7 +60,7 @@ export const probeOnce = (
       if (attempt === 3) break;
       yield* Effect.sleep(10 * 2 ** attempt);
     }
-    const end = Date.now(),
+    const end = yield* Clock.currentTimeMillis,
       duration = Math.max(1, end - start);
     let bodyValid = true;
     if (raw) {
