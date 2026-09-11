@@ -566,6 +566,156 @@ export const recordCheckMetricsEffect = (c: CheckResult): Effect.Effect<void> =>
 
 ---
 
+## Pattern 15: Ternary Chain with Catch-All → `Match.tagsExhaustive`
+
+**What changed:** Manual `_tag ===` comparisons with a catch-all default branch
+were replaced with `Match.tagsExhaustive` so adding a new `DomainError` variant
+produces a compile error instead of silently falling through.
+
+**Files affected:**
+- `domain/classify-match.ts` — `classifyDomainError`
+
+**Before:**
+```ts
+export const classifyDomainError = (e: DomainError): ErrorDisposition =>
+  e._tag === "TargetDisabled"
+    ? "ignore-disabled"
+    : e._tag === "InvalidBody"
+      ? "invalid-response"
+      : ["DnsError", "TimeoutError", "UnexpectedStatus"].includes(e._tag)
+        ? "service-down"
+        : "operator-action";
+```
+
+**After:**
+```ts
+export const classifyDomainError = (e: DomainError): ErrorDisposition =>
+  Match.value(e).pipe(
+    Match.tagsExhaustive({
+      TargetDisabled: () => "ignore-disabled" as const,
+      InvalidBody: () => "invalid-response" as const,
+      DnsError: () => "service-down" as const,
+      TimeoutError: () => "service-down" as const,
+      UnexpectedStatus: () => "service-down" as const,
+      RepositoryError: () => "operator-action" as const,
+      ConfigError: () => "operator-action" as const,
+      HistoryReadError: () => "operator-action" as const,
+      ValidationError: () => "operator-action" as const,
+    }),
+  );
+```
+
+**Why:**
+- Exhaustive: adding a new `DomainError` variant forces a compile error
+- No catch-all default that silently absorbs new variants
+- `Match.tagsExhaustive` is the idiomatic Effect pattern for discriminated unions
+
+---
+
+## Pattern 16: `Date.now()` → `Clock.currentTimeMillis`
+
+**What changed:** Ambient `Date.now()` calls inside Effect workflows were replaced
+with `Clock.currentTimeMillis` for testability with `TestClock`.
+
+**Files affected:**
+- `probe/ProbeProgram.ts` — `probeOnce`
+
+**Before:**
+```ts
+const start = Date.now();
+// ... probe logic ...
+const end = Date.now(), duration = Math.max(1, end - start);
+```
+
+**After:**
+```ts
+const start = yield* Clock.currentTimeMillis;
+// ... probe logic ...
+const end = yield* Clock.currentTimeMillis;
+const duration = Math.max(1, end - start);
+```
+
+**Why:**
+- `Date.now()` reads ambient time — not controllable in tests
+- `Clock.currentTimeMillis` reads from the Effect `Clock` service
+- `TestClock` can fast-forward time deterministically in tests
+
+---
+
+## Pattern 17: Manual Config Parsing → Effect `Config`
+
+**What changed:** Manual `process.env` parsing with `parseInt`/`Number()`/throw
+was replaced with `Config.all` composing typed `Config` values.
+
+**Files affected:**
+- `services/Config.ts` — `appConfigLayer`
+
+**Before:**
+```ts
+export const appConfig = (env = process.env): AppConfig => {
+  const workerConcurrency = Number(env.workerConcurrency ?? env.WORKER_CONCURRENCY);
+  if (!Number.isSafeInteger(workerConcurrency) || workerConcurrency <= 0)
+    throw new Error("workerConcurrency must be positive");
+  // ... manual parsing ...
+};
+```
+
+**After:**
+```ts
+export const appConfigLayer = Config.all({
+  pollInterval: Config.duration("POLL_INTERVAL").pipe(Config.withDefault(Duration.seconds(10))),
+  probeTimeout: Config.duration("PROBE_TIMEOUT").pipe(Config.withDefault(Duration.seconds(5))),
+  workerConcurrency: Config.int("WORKER_CONCURRENCY").pipe(Config.withDefault(2)),
+  slowThreshold: Config.duration("SLOW_THRESHOLD").pipe(Config.withDefault(Duration.seconds(3))),
+  telemetryEnabled: Config.boolean("TELEMETRY_ENABLED").pipe(Config.withDefault(true)),
+  maxIncidents: Config.int("MAX_INCIDENTS").pipe(Config.withDefault(100)),
+  realLlmToken: Config.redacted("REAL_LLM_TOKEN"),
+}).pipe(
+  Config.map((raw) => ({
+    pollInterval: Duration.toMillis(raw.pollInterval),
+    // ...
+  })),
+);
+```
+
+**Why:**
+- `Config` provides typed, composable, testable configuration
+- `Config.redacted` wraps secrets in `Redacted<T>` — safe to log
+- `Config.withDefault` provides fallback values declaratively
+- `Duration` fields are parsed as `Duration` objects, not raw numbers
+
+---
+
+## Pattern 18: Immutable Replacement → Return New Object
+
+**What changed:** Functions that mutated their input arguments were changed to
+return new objects with the updated fields.
+
+**Files affected:**
+- `domain/values.ts` — `renameCheck`
+
+**Before:**
+```ts
+export const renameCheck = (check: { id: string }, id: string) => {
+  check.id = id;  // mutates input
+  return check;
+};
+```
+
+**After:**
+```ts
+export const renameCheck = (check: { id: string }, id: string) => ({
+  ...check, id,
+});
+```
+
+**Why:**
+- Mutation violates referential transparency
+- Callers may hold references to the original object
+- Immutable replacement is the standard Effect pattern
+
+---
+
 ## Migration Order
 
 The migration was performed in this order to minimize ripple effects:
