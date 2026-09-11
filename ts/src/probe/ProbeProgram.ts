@@ -84,8 +84,17 @@ export const probeOnce = (
     const end = yield* Clock.currentTimeMillis,
       duration = Math.max(1, end - start);
     if (raw && target.healthBodySchema !== undefined) {
-      const healthSchema = yield* decodeHealthSchema(target.healthBodySchema);
-      if (!(yield* validateBody(healthSchema, raw.body)))
+      // Schema parse failures are recorded on the check (InvalidResponse with
+      // HealthSchemaParseError), not propagated as probe failures.
+      const response = raw;
+      const healthOutcome = yield* Effect.result(
+        Effect.flatMap(
+          decodeHealthSchema(target.healthBodySchema),
+          (schema) => validateBody(schema, response.body),
+        ),
+      );
+      if (Result.isFailure(healthOutcome)) failure = healthOutcome.failure;
+      else if (!healthOutcome.success)
         failure = new HealthBodyMismatch({ reason: "body did not match configured schema" });
     }
     // Without a health schema, every successfully decoded JSON value (including
