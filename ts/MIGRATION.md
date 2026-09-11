@@ -103,7 +103,7 @@ export const classifyProbe = (...): Result.Result<Classification, DomainError> =
 - `domain/schema.ts` — `CheckResult.failure`, `ResponseMetadata.status`, `ResponseMetadata.bytes`, `Incident.closedAt`, `Incident.summary`
 - `repo/CheckRepository.ts` — `getIncident`, `getOpenIncident` return types
 - `repo/SqliteCheckRepository.ts` — Same methods
-- `watch/StatusState.ts` — `StatusEntry.openIncident`, `StatusState.get`, `StatusStateEffect.get`
+- `watch/StatusState.ts` — `StatusEntry.openIncident`, `StatusStateEffect.get`
 - `obs/TargetTagsResolver.ts` — `TargetMeta.latestIncident`, `loadManyEffect`, `loadEffect`
 - `domain/values.ts` — `incidentCloseTime`, `formatIncidentWindow` parameters
 - `http/server.ts` — `getIncident` consumer
@@ -181,8 +181,6 @@ with `Effect.tryPromise` for error capture and `Effect.sleep` for delays.
 - `services/ProbeClient.ts` — `FakeProbeClient.probe`
 - `probe/ProbeProgram.ts` — `probeOnce`, `probeOnceWithRetry`
 - `services/DigestService.ts` — `importHistoryEffect`, `digestFromStreamEffect`
-- `watch/Scheduler.ts` — `runOnceEffect`
-- `repo/ConnectionPool.ts` — `nestedResourcesEffect`
 - `obs/Telemetry.ts` — `recordCheckMetricsEffect`
 
 **Before:**
@@ -305,7 +303,6 @@ or `Effect.sleep(0)` (explicit yield point).
 
 **Files affected:**
 - `stm/StatusBoard.ts` — All methods
-- `domain/defects.ts` — `validatePositiveInterval`, `assertCheckInvariant`
 - `smoke.ts` — `greet`
 
 **Before:**
