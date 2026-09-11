@@ -187,4 +187,5 @@ export const importHistoryEffect = (path: string): Effect.Effect<Digest, History
     ),
     Stream.runCollect,
     Effect.flatMap((chunk) => digestFromStreamEffect(Array.from(chunk))),
+    Effect.withSpan("digest"),
   );

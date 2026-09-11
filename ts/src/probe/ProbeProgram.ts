@@ -131,4 +131,4 @@ export const probeOnce = (
         ...(raw !== undefined && raw.bytes !== undefined ? { bytes: raw.bytes } : {}),
       }),
     });
-  });
+  }).pipe(Effect.withSpan("probe", { attributes: { target_id: target.id } }));

@@ -39,7 +39,7 @@ const checkPipeline = (
     const open = yield* Effect.tryPromise({ try: () => repository.getOpenIncident(check.targetId), catch: (e) => e as RepositoryError });
     yield* status.update(check, open);
     yield* recordCheckMetricsEffect(check);
-  });
+  }).pipe(Effect.annotateLogs("target_id", target.id));
 
 export const runOnceEffect = (
   targets: readonly (Target | TargetConfig)[],
