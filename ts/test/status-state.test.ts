@@ -1,7 +1,8 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Effect, Option } from "effect";
+import { Effect, Fiber, Option, Result } from "effect";
+import { TestClock } from "effect/testing";
 import { CheckResult, ResponseMetadata, Target, Up, targetId } from "../src/domain/schema.js";
-import { StatusState, StatusStateLayer } from "../src/watch/StatusState.js";
+import { ReadinessEffect, StatusState, StatusStateLayer } from "../src/watch/StatusState.js";
 
 const check = (id: string, at: number, target = "target_api") =>
   new CheckResult({
@@ -54,5 +55,25 @@ describe("status state", () => {
     Effect.gen(function*() {
       const status = yield* program;
       expect(Option.isNone(yield* status.get(targetId("target_none")))).toBe(true);
+    }));
+});
+
+describe("readiness (BUGS 2.8)", () => {
+  it.effect("wait blocks until completion settles the Deferred", () =>
+    Effect.gen(function*() {
+      const ready = yield* ReadinessEffect.create;
+      const fiber = yield* Effect.forkScoped(ready.wait);
+      yield* TestClock.adjust(100); // still waiting
+      yield* ready.complete("ok");
+      expect(yield* Fiber.join(fiber)).toBe("ok");
+    }));
+
+  it.effect("fail settles the wait with a typed error", () =>
+    Effect.gen(function*() {
+      const ready = yield* ReadinessEffect.create;
+      yield* ready.fail("boom");
+      const outcome = yield* Effect.result(ready.wait);
+      expect(Result.isFailure(outcome)).toBe(true);
+      if (Result.isFailure(outcome)) expect(outcome.failure).toBe("boom");
     }));
 });
