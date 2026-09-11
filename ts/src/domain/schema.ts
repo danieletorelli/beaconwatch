@@ -108,7 +108,10 @@ export class Target extends TargetConfig {
 }
 const positive = (d: DurationInput) => {
   const n = durationMillis(d);
-  if (!Number.isFinite(n) || n <= 0)
+  // Strictly positive: positive infinity satisfies the boundary (it can only
+  // reach here through the tagged-infinity persistence decode); NaN, negative
+  // infinity, zero, and negatives are rejected.
+  if (!(n > 0))
     throw new ValidationError({ field: "duration", reason: "duration must be positive" });
   return n;
 };

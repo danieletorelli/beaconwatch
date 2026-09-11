@@ -1,5 +1,6 @@
 import { Data, Effect, Schema, Stream } from "effect";
-import { readFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { Readable } from "node:stream";
 import { HistoryReadError } from "../domain/errors.js";
 import {
   CheckFailure,
@@ -41,17 +42,17 @@ const HistoryRowSchema = Schema.Struct({
   checkedAt: Schema.String,
   classification: Schema.Struct({ _tag: Schema.Literals(["Up", "Slow", "Down", "InvalidResponse", "Unknown"]) }),
   durationMillis: Schema.Number,
-  targetId: Schema.optionalKey(Schema.String),
+  targetId: Schema.String,
   failure: Schema.optionalKey(Schema.Struct({ reason: Schema.String })),
-  response: Schema.optionalKey(Schema.Struct({
+  response: Schema.Struct({
     status: Schema.optionalKey(Schema.Number),
     bytes: Schema.optionalKey(Schema.Number),
-  })),
+  }),
 });
 
 type HistoryRow = typeof HistoryRowSchema.Type;
 
-const toCheck = (x: any) =>
+const toCheck = (x: HistoryRow) =>
   new CheckResult({
     id: x.id,
     targetId: targetId(x.targetId),
@@ -60,7 +61,7 @@ const toCheck = (x: any) =>
     classification: new classes[
       x.classification._tag as keyof typeof classes
     ](),
-    failure: x.failure && new CheckFailure(x.failure),
+    ...(x.failure ? { failure: new CheckFailure(x.failure) } : {}),
     response: new ResponseMetadata(x.response ?? {}),
   });
 
@@ -114,7 +115,10 @@ export const digestFromStreamEffect = (
     return { targets, incidents: [], malformedRows, processedRows };
   });
 
-export const decodeHistoryLineEffect = (line: string, lineNo: number): Effect.Effect<HistoryRow, MalformedHistoryRow> =>
+export const decodeHistoryLineEffect = (
+  line: string,
+  lineNo: number,
+): Effect.Effect<CheckResult, MalformedHistoryRow> =>
   Effect.try({
     try: () => JSON.parse(line),
     catch: (e) => new MalformedHistoryRow({ line: lineNo, reason: String(e) }),
@@ -124,29 +128,51 @@ export const decodeHistoryLineEffect = (line: string, lineNo: number): Effect.Ef
         Effect.mapError(() => new MalformedHistoryRow({ line: lineNo, reason: "schema validation failed" })),
       )
     ),
+    // Every row-conversion failure becomes a structured MalformedHistoryRow
+    // carrying the filtered line number (17.9).
+    Effect.flatMap((row) =>
+      Effect.try({
+        try: () => toCheck(row),
+        catch: (e) => new MalformedHistoryRow({ line: lineNo, reason: String(e) }),
+      }),
+    ),
+  );
+
+// Incremental UTF-8 line source with fatal decoding: malformed byte sequences
+// fail as HistoryReadError instead of being replacement-decoded (17.6), and
+// consumers taking a finite prefix never read the remainder (17.5).
+const historyLines = (path: string): Stream.Stream<string, HistoryReadError> =>
+  Stream.fromAsyncIterable(
+    (async function* () {
+      const decoded = Readable.toWeb(createReadStream(path)).pipeThrough(
+        new TextDecoderStream("utf-8", { fatal: true }),
+      );
+      for await (const chunk of decoded as AsyncIterable<string>) yield chunk;
+      yield "\n"; // flush a final line without trailing newline
+    })(),
+    (e) => new HistoryReadError({ path, cause: e }),
+  ).pipe(
+    // mapAccum spreads the returned line array as individual elements
+    Stream.mapAccum(() => "", (pending: string, chunk: string) => {
+      const parts = (pending + chunk).split(/\r?\n/);
+      return [parts.pop() ?? "", parts] as const;
+    }),
   );
 
 export const importHistoryEffect = (path: string): Effect.Effect<Digest, HistoryReadError> =>
-  Effect.tryPromise({
-    try: () => readFile(path, "utf8"),
-    catch: (e) => new HistoryReadError({ path, cause: e }),
-  }).pipe(
-    Effect.flatMap((text) => {
-      const lines = text.split(/\r?\n/).filter((x) => x.trim());
-      return Stream.fromIterable(lines).pipe(
-        Stream.mapAccumEffect<number, string, CheckResult | MalformedHistoryRow, never, never>(
-          () => 0,
-          (i, line) =>
-            decodeHistoryLineEffect(line, i + 1).pipe(
+  historyLines(path).pipe(
+    Stream.mapAccumEffect<number, string, CheckResult | MalformedHistoryRow, never, never>(
+      () => 0,
+      (i, line) =>
+        line.trim() === ""
+          ? Effect.succeed([i, []] as const) // blank lines are ignored and unnumbered
+          : decodeHistoryLineEffect(line, i + 1).pipe(
               Effect.match({
-                onSuccess: (row) => [i + 1, [toCheck(row) as CheckResult]] as const,
+                onSuccess: (row) => [i + 1, [row]] as const,
                 onFailure: (e) => [i + 1, [e] as ReadonlyArray<MalformedHistoryRow>] as const,
               })
-            )
-        ),
-        Stream.runCollect,
-        Effect.map((chunk) => Array.from(chunk)),
-        Effect.flatMap((rows) => digestFromStreamEffect(rows)),
-      );
-    }),
+            ),
+    ),
+    Stream.runCollect,
+    Effect.flatMap((chunk) => digestFromStreamEffect(Array.from(chunk))),
   );

@@ -25,6 +25,35 @@ import {
 import { RepositoryError } from "../domain/errors.js";
 const classes = { Up, Slow, Down, InvalidResponse, Unknown };
 type Row = Record<string, unknown>;
+// Versioned duration codec: legacy numeric millisecond values plus tagged
+// millisecond/nanosecond and infinity encodings (SPEC 4.1). Unknown tags fail
+// as repository errors.
+const decodeDuration = (x: unknown): number => {
+  if (typeof x === "number") return x;
+  if (x !== null && typeof x === "object" && "tag" in x) {
+    const t = x as { tag: unknown; millis?: unknown; nanos?: unknown; direction?: unknown };
+    if (t.tag === "millis" && typeof t.millis === "number") return t.millis;
+    if (t.tag === "nanos" && Number.isSafeInteger(t.nanos)) return (t.nanos as number) / 1_000_000;
+    if (t.tag === "infinity") {
+      if (t.direction === "positive") return Number.POSITIVE_INFINITY;
+      if (t.direction === "negative") return Number.NEGATIVE_INFINITY;
+    }
+  }
+  throw new RepositoryError({
+    operation: "decodeDuration",
+    cause: `unknown duration encoding: ${JSON.stringify(x)}`,
+  });
+};
+const encodeDuration = (n: number): number | Record<string, unknown> => {
+  if (n === Number.POSITIVE_INFINITY) return { tag: "infinity", direction: "positive" };
+  if (Number.isInteger(n)) return n;
+  const nanos = n * 1_000_000;
+  if (Number.isSafeInteger(nanos)) return { tag: "nanos", nanos };
+  throw new RepositoryError({
+    operation: "saveCheck",
+    cause: `duration ${String(n)} is not representable`,
+  });
+};
 export const makeTempFilename = () =>
   join(
     tmpdir(),
@@ -54,6 +83,7 @@ export class SqliteCheckRepository implements CheckRepositoryShape {
       const x = JSON.parse(s);
       return new CheckResult({
         ...x,
+        duration: decodeDuration(x.duration),
         checkedAt: new Date(x.checkedAt),
         classification: new classes[
           x.classification._tag as keyof typeof classes
@@ -104,7 +134,7 @@ export class SqliteCheckRepository implements CheckRepositoryShape {
     }
     this.db
       .prepare("insert into checks values(?,?)")
-      .run(c.id, JSON.stringify(c));
+      .run(c.id, JSON.stringify({ ...c, duration: encodeDuration(c.duration) }));
   }
   async listChecks(id?: TargetId) {
     const rows = (
@@ -143,14 +173,34 @@ export class SqliteCheckRepository implements CheckRepositoryShape {
       )
       .run(i.id, JSON.stringify(i));
   }
+  private tail: Promise<unknown> = Promise.resolve();
+  // Transitions are serialized against concurrent applyCheck calls so the
+  // single SQLite connection never nests transactions (SPEC 4.2).
   async applyCheck(c: CheckResult): Promise<IncidentTransition> {
-    const targets = await this.listTargets();
-    const checks = await this.listChecks();
-    for (const t of targets) await this.memory.saveTarget(t);
-    for (const x of checks) await this.memory.saveCheck(x);
+    const run = () => this.applyCheckTransaction(c);
+    const result = this.tail.then(run, run);
+    this.tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result.then(async ({ transition, pendingEvents }) => {
+      // External delivery starts only after the transaction has committed.
+      for (const eventId of pendingEvents) await this.send(eventId);
+      return transition;
+    });
+  }
+  private async applyCheckTransaction(
+    c: CheckResult,
+  ): Promise<{ transition: IncidentTransition; pendingEvents: number[] }> {
+    // Project only this target's rows into the in-memory transition engine
+    // instead of reloading the entire database on every call.
+    for (const x of await this.listChecks(c.targetId))
+      await this.memory.saveCheck(x);
     for (const r of this.db
-      .prepare("select json from incidents")
-      .all() as Row[])
+      .prepare(
+        "select json from incidents where json_extract(json,'$.targetId')=?",
+      )
+      .all(String(c.targetId)) as Row[])
       await this.memory.saveIncident(this.incident(String(r.json)));
     const transition = await this.memory.applyCheck(c);
     const pendingEvents: number[] = [];
@@ -189,10 +239,7 @@ export class SqliteCheckRepository implements CheckRepositoryShape {
       this.db.exec("rollback");
       throw error;
     }
-    for (const eventId of pendingEvents) {
-      await this.send(eventId);
-    }
-    return transition;
+    return { transition, pendingEvents };
   }
   async deliverPending(send: (eventId: number) => void | Promise<void>) {
     const rows = this.db.prepare("select id,event_id from delivery_outbox where delivered_at is null order by id").all() as Array<{ id: number; event_id: number }>;
