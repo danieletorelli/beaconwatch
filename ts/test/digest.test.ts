@@ -1,0 +1,88 @@
+import { describe, expect, it } from "@effect/vitest";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Effect } from "effect";
+import { importHistoryEffect } from "../src/services/DigestService.js";
+import { HistoryReadError } from "../src/domain/errors.js";
+
+const row = (id: string, tag: string, millis: number) =>
+  JSON.stringify({
+    id,
+    targetId: "target_cli",
+    checkedAt: "2026-01-01T00:00:00.000Z",
+    durationMillis: millis,
+    classification: { _tag: tag },
+    response: {},
+  });
+
+describe("history import and digest", () => {
+  it.effect("ignores blanks without line numbers and counts malformed rows", () =>
+    Effect.gen(function*() {
+      const dir = yield* Effect.promise(() => mkdtemp(join(tmpdir(), "bw-digest-")));
+      const path = join(dir, "history.ndjson");
+      yield* Effect.promise(() =>
+        writeFile(path, [row("a", "Up", 10), "", "   ", row("b", "Down", 20), '{"broken"', row("c", "Slow", 5)].join("\n") + "\n"),
+      );
+      const digest = yield* importHistoryEffect(path);
+      // a=Up, b=Down, c=Slow processed; one malformed line; blanks unnumbered.
+      expect(digest.processedRows).toBe(3);
+      expect(digest.malformedRows).toBe(1);
+      expect(digest.targets).toHaveLength(1);
+      const t = digest.targets[0]!;
+      expect(t.currentStatus).toBe("Slow");
+      expect(t.checks).toBe(3);
+      expect(t.p95LatencyMillis).toBe(20);
+      expect(t.uptimePercent).toBeCloseTo((1 / 3) * 100, 5);
+    }));
+
+  it.effect("conflicting duplicate ids exclude the id and add one malformed", () =>
+    Effect.gen(function*() {
+      const dir = yield* Effect.promise(() => mkdtemp(join(tmpdir(), "bw-digest-")));
+      const path = join(dir, "conflict.ndjson");
+      yield* Effect.promise(() =>
+        writeFile(path, [row("a", "Up", 10), row("a", "Down", 99), row("b", "Up", 5)].join("\n") + "\n"),
+      );
+      const digest = yield* importHistoryEffect(path);
+      expect(digest.processedRows).toBe(3);
+      expect(digest.malformedRows).toBe(1); // conflicting id penalty
+      const t = digest.targets[0]!;
+      expect(t.checks).toBe(1); // only the non-conflicting id contributes
+      expect(t.targetId).toBe("target_cli");
+    }));
+
+  it.effect("missing files fail as HistoryReadError with the path", () =>
+    Effect.gen(function*() {
+      const outcome = yield* Effect.result(
+        importHistoryEffect(join(tmpdir(), "bw-digest-missing.ndjson")),
+      );
+      expect(outcome._tag).toBe("Failure");
+      if (outcome._tag === "Failure") {
+        expect(outcome.failure._tag).toBe("HistoryReadError");
+        expect(String(outcome.failure.path)).toContain("missing");
+      }
+    }));
+
+  it.effect("malformed UTF-8 fails as HistoryReadError", () =>
+    Effect.gen(function*() {
+      const dir = yield* Effect.promise(() => mkdtemp(join(tmpdir(), "bw-digest-")));
+      const path = join(dir, "bad.ndjson");
+      yield* Effect.promise(() => writeFile(path, new Uint8Array([0xff, 0xfe])));
+      const outcome = yield* Effect.result(importHistoryEffect(path));
+      expect(outcome._tag === "Failure" && outcome.failure._tag === "HistoryReadError").toBe(true);
+    }));
+
+  it.effect("durations violating the nanosecond bound are malformed rows", () =>
+    Effect.gen(function*() {
+      const dir = yield* Effect.promise(() => mkdtemp(join(tmpdir(), "bw-digest-")));
+      const path = join(dir, "huge.ndjson");
+      yield* Effect.promise(() =>
+        writeFile(path, [row("a", "Up", 10), row("b", "Up", 1e308)].join("\n") + "\n"),
+      );
+      const digest = yield* importHistoryEffect(path);
+      expect(digest.processedRows).toBe(1);
+      expect(digest.malformedRows).toBe(1);
+    }));
+});
+
+expect(typeof HistoryReadError).toBe("function");
