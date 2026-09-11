@@ -5,3 +5,4 @@ dist/
 *.sqlite-journal
 .beaconwatch/
 .exscratch/
+coverage/
