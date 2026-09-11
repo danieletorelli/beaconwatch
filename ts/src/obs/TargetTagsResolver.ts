@@ -1,37 +1,77 @@
-import { Effect, Option } from "effect";
+import { Context, Effect, Layer, Option, Ref, Request, RequestResolver } from "effect";
+
 import type { TargetId } from "../domain/schema.js";
 
 export interface TargetMeta {
-  tags: readonly string[];
-  latestIncident: Option.Option<string>;
+  readonly tags: ReadonlyArray<string>;
+  readonly latestIncident: Option.Option<string>;
 }
 
-export class TargetTagsBackend {
-  calls = 0;
-  constructor(private backing: ReadonlyMap<TargetId, TargetMeta>) {}
+export class LoadTargetMeta extends Request.TaggedClass("LoadTargetMeta")<
+  { readonly targetId: TargetId },
+  TargetMeta,
+  never
+> {}
 
-  loadManyEffect(ids: readonly TargetId[]): Effect.Effect<(Option.Option<TargetMeta>)[]> {
-    return Effect.sync(() => {
-      const unique = [...new Set(ids)];
-      return unique.map((id) => {
-        this.calls++;
-        const x = this.backing.get(id);
-        return x
-          ? Option.some({ ...x, tags: [...x.tags] })
-          : Option.none();
+export interface TargetTagsBackendShape {
+  readonly resolver: RequestResolver.RequestResolver<LoadTargetMeta>;
+  readonly calls: Effect.Effect<number>;
+  readonly requestedIds: Effect.Effect<ReadonlyArray<ReadonlyArray<TargetId>>>;
+}
+export class TargetTagsBackend extends Context.Service<TargetTagsBackend, TargetTagsBackendShape>()("beaconwatch/TargetTagsBackend") {}
+
+/**
+ * Metadata lookups batch by target id (module 14): concurrent lookups within
+ * one batching window collapse into a single loadMany call per group, and a
+ * missing key resolves to None instead of never settling (BUGS 1.1) with
+ * per-id answers (BUGS 5.1).
+ */
+export const layer = (
+  backing: ReadonlyMap<TargetId, TargetMeta>,
+  loadMany: (
+    ids: ReadonlyArray<TargetId>,
+  ) => Effect.Effect<ReadonlyMap<TargetId, TargetMeta | undefined>> = (ids) =>
+    Effect.sync(() => new Map(ids.map((id) => [id, backing.get(id)]))),
+) =>
+  Layer.effect(TargetTagsBackend)(
+    Effect.gen(function*() {
+      const counter = yield* Ref.make(0);
+      const requestedIds = yield* Ref.make<ReadonlyArray<ReadonlyArray<TargetId>>>([]);
+      const resolver = RequestResolver.makeGrouped<LoadTargetMeta, string>({
+        key: () => "all-target-tags",
+        resolver: (entries) =>
+          Effect.gen(function*() {
+            yield* Ref.update(counter, (n) => n + 1);
+            const ids = [...new Set(entries.map((e) => e.request.targetId))];
+            yield* Ref.update(
+              requestedIds,
+              (batches) => [...batches, ids],
+            );
+            const rows = yield* loadMany(ids);
+            for (const entry of entries) {
+              const meta = rows.get(entry.request.targetId);
+              yield* Request.succeed(
+                entry,
+                meta === undefined
+                  ? { tags: [], latestIncident: Option.none() }
+                  : { ...meta, tags: [...meta.tags] },
+              );
+            }
+          }),
       });
-    });
-  }
+      return {
+        resolver,
+        calls: Ref.get(counter),
+        requestedIds: Ref.get(requestedIds),
+      };
+    }),
+  );
 
-  loadEffect(id: TargetId): Effect.Effect<Option.Option<TargetMeta>> {
-    return this.loadManyEffect([id]).pipe(
-      Effect.map((rows) => rows[0]!),
+export const loadTargetMeta = (targetId: TargetId) =>
+  Effect.gen(function*() {
+    const backend = yield* TargetTagsBackend;
+    return yield* Effect.request(
+      new LoadTargetMeta({ targetId }),
+      backend.resolver,
     );
-  }
-}
-
-export const layer = (m: ReadonlyMap<TargetId, TargetMeta>) =>
-  new TargetTagsBackend(m);
-
-export const loadTargetMetaEffect = (id: TargetId, b: TargetTagsBackend) =>
-  b.loadEffect(id);
+  });
