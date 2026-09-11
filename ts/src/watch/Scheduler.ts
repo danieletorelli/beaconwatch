@@ -15,12 +15,12 @@ export interface SchedulerServices {
   status: StatusStateEffect;
 }
 const validate = (o: SchedulerOptions) => {
-  if (!Number.isSafeInteger(o.queueCapacity) || o.queueCapacity <= 0)
+  if (!Number.isSafeInteger(o.queueCapacity) || o.queueCapacity <= 0 || o.queueCapacity > 1_000_000)
     throw new ConfigError({
-      reason: "queueCapacity must be a positive integer",
+      reason: "queueCapacity must be a safe integer from 1 through 1000000",
     });
-  if (!Number.isSafeInteger(o.workerCount) || o.workerCount <= 0)
-    throw new ConfigError({ reason: "workerCount must be a positive integer" });
+  if (!Number.isSafeInteger(o.workerCount) || o.workerCount <= 0 || o.workerCount > 1024)
+    throw new ConfigError({ reason: "workerCount must be a safe integer from 1 through 1024" });
 };
 const enabled = (t: Target | TargetConfig) => !("enabled" in t) || t.enabled;
 

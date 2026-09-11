@@ -4,6 +4,7 @@ import {
   InvalidBody,
   TimeoutError,
   UnexpectedStatus,
+  ValidationError,
 } from "../domain/errors.js";
 import type { Target, TargetConfig } from "../domain/schema.js";
 export interface RawProbeResponse {
@@ -84,12 +85,30 @@ export class FakeProbeClient implements ProbeClientShape {
   private scripts: Map<string, Step[]>;
   private counts = new Map<string, number>();
   constructor(input: Record<string, Step | readonly Step[]>) {
-    this.scripts = new Map(
+    const scripts = new Map(
       Object.entries(input).map(([k, v]) => [
         k,
         Array.isArray(v) ? ([...v] as Step[]) : [v as Step],
       ]),
     );
+    for (const [key, steps] of scripts) {
+      if (steps.length === 0)
+        throw new ValidationError({ field: key, reason: "script sequence must not be empty" });
+      for (const step of steps)
+        if (
+          typeof step === "object" &&
+          step !== null &&
+          "_tag" in step &&
+          step._tag === "recover-after" &&
+          !(Number.isSafeInteger((step as { failures: number }).failures) &&
+            (step as { failures: number }).failures >= 0)
+        )
+          throw new ValidationError({
+            field: key,
+            reason: "recover-after count must be a non-negative safe integer",
+          });
+    }
+    this.scripts = scripts;
   }
   probe(t: ProbeTarget, _signal?: AbortSignal): Effect.Effect<RawProbeResponse, ProbeFailure> {
     return fakeProbeImpl(this.scripts, this.counts, t, _signal);

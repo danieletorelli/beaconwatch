@@ -35,7 +35,12 @@ const probeOnceImpl = (
     signal?.addEventListener("abort", abort, { once: true });
     try {
       const response = yield* Effect.tryPromise({
-        try: () => fetcher(url, { method: target.method, signal: own.signal }),
+        try: () =>
+          fetcher(url, {
+            method: target.method,
+            signal: own.signal,
+            headers: { accept: "application/json" },
+          }),
         catch: (e) => {
           if (own.signal.aborted) return new TimeoutError({ timeout: String(target.timeout), cause: e });
           return new DnsError({ host: url.host, cause: e });
