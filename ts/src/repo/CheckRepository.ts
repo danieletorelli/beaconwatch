@@ -73,7 +73,19 @@ export class InMemoryCheckRepository implements CheckRepositoryShape {
   async saveIncident(i: Incident) {
     this.incidents.set(i.id, cloneIncident(i));
   }
+  private tail: Promise<unknown> = Promise.resolve();
+  // Transitions are serialized against concurrent applyCheck calls so that
+  // two concurrent failures produce exactly one Opened and one Updated.
   async applyCheck(c: CheckResult): Promise<IncidentTransition> {
+    const run = () => this.applyCheckUnserialized(c);
+    const result = this.tail.then(run, run);
+    this.tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+  private async applyCheckUnserialized(c: CheckResult): Promise<IncidentTransition> {
     let result: IncidentTransition = "Unchanged";
     {
       const old = this.checks.get(c.id);

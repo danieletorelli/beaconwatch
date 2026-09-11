@@ -10,12 +10,18 @@ export const createApiHandler =
       res.writeHead(status, { "content-type": "application/json" });
       res.end(JSON.stringify(value));
     };
-    try {
-      const url = new URL(req.url ?? "/", "http://localhost");
-      if (req.method !== "GET")
-        return send(405, { message: "method not allowed" });
-      if (url.pathname === "/openapi.json") return send(200, openApiDocument);
-      if (url.pathname === "/targets")
+    // Repository failures map to stable route-specific messages; internal
+    // causes are logged but never exposed.
+    const repoFailure = (message: string) => (e: unknown) => {
+      console.error("repository failure:", e);
+      return send(500, { message });
+    };
+    const url = new URL(req.url ?? "/", "http://localhost");
+    if (req.method !== "GET")
+      return send(405, { message: "method not allowed" });
+    if (url.pathname === "/openapi.json") return send(200, openApiDocument);
+    if (url.pathname === "/targets") {
+      try {
         return send(
           200,
           (await repo.listTargets()).map(({ id, name, url, enabled }) => ({
@@ -25,12 +31,22 @@ export const createApiHandler =
             enabled,
           })),
         );
-      if (url.pathname === "/status")
+      } catch (e) {
+        return repoFailure("failed to list targets")(e);
+      }
+    }
+    if (url.pathname === "/status") {
+      try {
         return send(200, {
           ok: true,
           targets: (await repo.listTargets()).length,
         });
-      if (url.pathname === "/checks")
+      } catch (e) {
+        return repoFailure("failed to read status")(e);
+      }
+    }
+    if (url.pathname === "/checks") {
+      try {
         return send(
           200,
           (await repo.listChecks()).map((c) => ({
@@ -39,10 +55,15 @@ export const createApiHandler =
             classification: c.classification._tag,
           })),
         );
-      if (url.pathname.startsWith("/incidents/")) {
-        const id = decodeURIComponent(url.pathname.slice(11));
-        if (!incidentIdPattern.test(id))
-          return send(400, { message: "invalid incident id" });
+      } catch (e) {
+        return repoFailure("failed to list checks")(e);
+      }
+    }
+    if (url.pathname.startsWith("/incidents/")) {
+      const id = decodeURIComponent(url.pathname.slice(11));
+      if (!incidentIdPattern.test(id))
+        return send(400, { message: "invalid incident id" });
+      try {
         const iResult = await repo.getIncident(id);
         return Option.isSome(iResult)
           ? send(200, {
@@ -52,12 +73,11 @@ export const createApiHandler =
               reason: iResult.value.reason,
             })
           : send(404, { message: `incident not found: ${id}` });
+      } catch (e) {
+        return repoFailure("failed to read incident")(e);
       }
-      return send(404, { message: "not found" });
-    } catch (e) {
-      console.error("internal server error:", e);
-      return send(500, { message: "internal server error" });
     }
+    return send(404, { message: "not found" });
   };
 export const startServer = (repo: CheckRepositoryShape, port = 0) =>
   new Promise<{ server: http.Server; baseUrl: string }>((resolve, reject) => {
