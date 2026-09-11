@@ -37,11 +37,23 @@ export interface Digest {
 
 const classes = { Up, Slow, Down, InvalidResponse, Unknown };
 
+// SPEC 7.1: finite, strictly positive, and exactly representable as a safe
+// integer number of nanoseconds.
+const DurationMillis = Schema.Number.pipe(
+  Schema.check(
+    Schema.makeFilter((millis: number) =>
+      Number.isFinite(millis) && millis > 0 && Number.isSafeInteger(millis * 1_000_000)
+        ? undefined
+        : "durationMillis must be positive with a safe-integer nanosecond value"
+    ),
+  ),
+);
+
 const HistoryRowSchema = Schema.Struct({
   id: Schema.String,
   checkedAt: Schema.String,
   classification: Schema.Struct({ _tag: Schema.Literals(["Up", "Slow", "Down", "InvalidResponse", "Unknown"]) }),
-  durationMillis: Schema.Number,
+  durationMillis: DurationMillis,
   targetId: Schema.String,
   failure: Schema.optionalKey(Schema.Struct({ reason: Schema.String })),
   response: Schema.Struct({
